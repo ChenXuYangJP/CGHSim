@@ -1,0 +1,90 @@
+{
+  "folders": [
+    {
+      "name": "CGHSim",
+      "path": "/home/cxy/Documents/Unreal Projects/CGHSim"
+    },
+    {
+      "name": "UE5",
+      "path": "/home/cxy/opt/UnrealEngine/UE5"
+    }
+  ],
+  "extensions": {
+    "recommendations": [
+      "ms-vscode.cpptools",
+      "ms-dotnettools.csharp",
+      "vadimcn.vscode-lldb"
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "CGHSim Dev: Build Editor",
+        "type": "process",
+        "command": "/bin/bash",
+        "args": [
+          "/home/cxy/opt/UnrealEngine/UE5/Engine/Build/BatchFiles/Linux/Build.sh",
+          "CGHSimEditor",
+          "Linux",
+          "Development",
+          "-Project=/home/cxy/Documents/Unreal Projects/CGHSim/CGHSim.uproject",
+          "-WaitMutex"
+        ],
+        "options": {
+          "cwd": "/home/cxy/opt/UnrealEngine/UE5"
+        },
+        "group": {
+          "kind": "build",
+          "isDefault": true
+        },
+        "problemMatcher": [
+          "$gcc"
+        ],
+        "presentation": {
+          "reveal": "always",
+          "panel": "dedicated"
+        }
+      }
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "CGHSim Dev: Simulation",
+        "type": "lldb",
+        "request": "launch",
+        "program": "/home/cxy/opt/UnrealEngine/UE5/Engine/Binaries/Linux/UnrealEditor",
+        "args": [
+          "/home/cxy/Documents/Unreal Projects/CGHSim/CGHSim.uproject",
+          "-game",
+          "-log",
+          "-windowed",
+          "-ResX=1280",
+          "-ResY=720"
+        ],
+        "envFile": "/home/cxy/Documents/Unreal Projects/CGHSim/.ue-desktop.env",
+        "cwd": "/home/cxy/Documents/Unreal Projects/CGHSim",
+        "preLaunchTask": "CGHSim Dev: Build Editor",
+        "stopOnEntry": false,
+        "terminal": "integrated"
+      },
+      {
+        "name": "CGHSim Dev: Unreal Editor",
+        "type": "lldb",
+        "request": "launch",
+        "program": "/home/cxy/opt/UnrealEngine/UE5/Engine/Binaries/Linux/UnrealEditor",
+        "args": [
+          "/home/cxy/Documents/Unreal Projects/CGHSim/CGHSim.uproject",
+          "-log"
+        ],
+        "envFile": "/home/cxy/Documents/Unreal Projects/CGHSim/.ue-desktop.env",
+        "cwd": "/home/cxy/Documents/Unreal Projects/CGHSim",
+        "preLaunchTask": "CGHSim Dev: Build Editor",
+        "stopOnEntry": false,
+        "terminal": "integrated"
+      }
+    ]
+  }
+}

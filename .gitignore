@@ -1,0 +1,38 @@
+
+# Unreal Engine generated files
+/Binaries/
+/Intermediate/
+/Saved/
+/DerivedDataCache/
+
+# Generated files for source-based project plugins
+/Plugins/**/Binaries/
+/Plugins/**/Intermediate/
+
+# Packaged application output
+/Dist/
+
+# Generated IDE files and local IDE settings
+/.vscode/
+/.vs/
+/.idea/
+*.sln
+*.suo
+*.VC.db
+*.VC.opendb
+/compile_commands.json
+/compile_commands_*.json
+
+# Ignore generated workspaces, keep our maintained workspace
+/*.code-workspace
+!/CGHSim.Dev.code-workspace
+
+# Machine-specific desktop session and environment files
+/.ue-desktop.env
+.env
+.env.*
+!.env.example
+
+# Operating system files
+.DS_Store
+Thumbs.db
