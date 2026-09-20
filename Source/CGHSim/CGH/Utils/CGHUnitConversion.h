@@ -1,6 +1,6 @@
 #pragma once
 
-// Unreal scene distances are centimeters; future solver distances are meters.
+// Unreal scene distances are centimeters; scene-description distances are meters.
 namespace CGHUnits
 {
 	constexpr double CmToM(double Value) { return Value * 0.01; }

@@ -50,6 +50,16 @@ void ACGHCameraActor::OnConstruction(const FTransform& Transform)
 	RefreshVisualization();
 }
 
+FTransform ACGHCameraActor::GetOpticalTransform() const
+{
+	return IsValid(OpticalReference) ? OpticalReference->GetComponentTransform() : GetActorTransform();
+}
+
+USceneComponent* ACGHCameraActor::GetOpticalReference() const
+{
+	return OpticalReference;
+}
+
 void ACGHCameraActor::RefreshVisualization()
 {
 	UpdatePreviewCamera();

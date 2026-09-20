@@ -4,14 +4,19 @@
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHTargetActor.h"
+#include "CGH/Utils/CGHUnitConversion.h"
 #include "Components/SceneComponent.h"
 #include "Components/TextRenderComponent.h"
+#include "UObject/UObjectGlobals.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCGHWorkbench, Log, All);
 
 ACGHWorkbenchActor::ACGHWorkbenchActor()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bStartWithTickEnabled = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;
+	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
 
 	Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(Root);
@@ -26,13 +31,258 @@ ACGHWorkbenchActor::ACGHWorkbenchActor()
 void ACGHWorkbenchActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
-	// Referenced actors may still be loading. Only update our own presentation.
+	UpdateSceneDescription();
 	Label->SetText(FText::FromString(
 		TEXT("CGH Workbench\nRun Validate Scene\nOptical solver: not implemented")));
 }
 
+void ACGHWorkbenchActor::PostRegisterAllComponents()
+{
+	Super::PostRegisterAllComponents();
+	if (IsTemplate() || !GetWorld())
+	{
+		return;
+	}
+
+#if WITH_EDITOR
+	// Registration also runs after reconstruction; never accumulate duplicate subscriptions.
+	FCoreUObjectDelegates::OnObjectPropertyChanged.RemoveAll(this);
+	FCoreUObjectDelegates::OnObjectPropertyChanged.AddUObject(this, &ACGHWorkbenchActor::OnSceneObjectPropertyChanged);
+	FCoreUObjectDelegates::OnObjectTransacted.RemoveAll(this);
+	FCoreUObjectDelegates::OnObjectTransacted.AddUObject(this, &ACGHWorkbenchActor::OnSceneObjectTransacted);
+#endif
+	UpdateSceneDescription();
+}
+
+void ACGHWorkbenchActor::PostUnregisterAllComponents()
+{
+	RemoveSceneObservers();
+#if WITH_EDITOR
+	FCoreUObjectDelegates::OnObjectPropertyChanged.RemoveAll(this);
+	FCoreUObjectDelegates::OnObjectTransacted.RemoveAll(this);
+#endif
+	Super::PostUnregisterAllComponents();
+}
+
+void ACGHWorkbenchActor::BeginPlay()
+{
+	Super::BeginPlay();
+	UpdateSceneDescription();
+}
+
+void ACGHWorkbenchActor::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	// Public struct members can be written directly by C++/Blueprint without a setter
+	// or property event. Sample after normal actor ticks, including in editor viewports.
+	UpdateSceneDescription();
+}
+
+bool ACGHWorkbenchActor::IsSceneActorAvailable(const AActor* Actor) const
+{
+	return IsValid(Actor) && !Actor->IsActorBeingDestroyed() && Actor->GetWorld() == GetWorld();
+}
+
+void ACGHWorkbenchActor::UpdateSceneDescription()
+{
+	if (bUpdatingSceneDescription || IsTemplate() || !GetWorld())
+	{
+		return;
+	}
+	TGuardValue<bool> UpdatingGuard(bUpdatingSceneDescription, true);
+	RefreshSceneObservers();
+
+	// Rebuild from scratch so deleted/unassigned references never retain stale data.
+	FCGHSceneDescription Updated;
+	bSceneDescriptionComplete = false;
+	if (!IsSceneActorAvailable(SLM))
+	{
+		SceneDescription = MoveTemp(Updated);
+		return; // Without the reference frame there are no meaningful local positions.
+	}
+
+	const FTransform SLMTransform = SLM->GetActorTransform();
+	const auto LocalPositionMeters = [&SLMTransform](const FVector& WorldPosition)
+	{
+		// Preserve signed projections onto the SLM axes: +X is the optical normal.
+		// Points along that normal have X > 0; points behind its plane have X < 0.
+		return SLMTransform.InverseTransformPositionNoScale(WorldPosition) * CGHUnits::CmToM(1.0);
+	};
+	const auto LocalDirection = [&SLMTransform](const FVector& WorldDirection)
+	{
+		return SLMTransform.InverseTransformVectorNoScale(WorldDirection).GetSafeNormal();
+	};
+
+	const FCGHSLMParameters& SLMParameters = SLM->Parameters;
+	Updated.SLM.ResolutionX = SLMParameters.ResolutionX;
+	Updated.SLM.ResolutionY = SLMParameters.ResolutionY;
+	Updated.SLM.PixelPitchXM = CGHUnits::UmToM(SLMParameters.PixelPitchXUm);
+	Updated.SLM.PixelPitchYM = CGHUnits::UmToM(SLMParameters.PixelPitchYUm);
+	Updated.SLM.ActiveWidthM = SLMParameters.ResolutionX * Updated.SLM.PixelPitchXM;
+	Updated.SLM.ActiveHeightM = SLMParameters.ResolutionY * Updated.SLM.PixelPitchYM;
+	Updated.SLM.ModulationType = SLMParameters.ModulationType;
+
+	const bool bHasCamera = IsSceneActorAvailable(Camera);
+	if (bHasCamera)
+	{
+		const FCGHCameraParameters& Parameters = Camera->Parameters;
+		const FTransform OpticalTransform = Camera->GetOpticalTransform();
+		Updated.Camera.OpticalPositionSLMM = LocalPositionMeters(OpticalTransform.GetLocation());
+		Updated.Camera.ForwardDirectionSLM = LocalDirection(OpticalTransform.GetUnitAxis(EAxis::X));
+		Updated.Camera.FocalLengthM = CGHUnits::MmToM(Parameters.FocalLengthMm);
+		Updated.Camera.FNumber = Parameters.FNumber;
+		Updated.Camera.FocusDistanceM = CGHUnits::MmToM(Parameters.FocusDistanceMm);
+		Updated.Camera.SensorWidthM = CGHUnits::MmToM(Parameters.SensorWidthMm);
+		Updated.Camera.SensorHeightM = CGHUnits::MmToM(Parameters.SensorHeightMm);
+		Updated.Camera.OutputResolutionX = Parameters.OutputResolutionX;
+		Updated.Camera.OutputResolutionY = Parameters.OutputResolutionY;
+	}
+
+	const bool bHasLight = IsSceneActorAvailable(ReconstructionLight);
+	if (bHasLight)
+	{
+		const FCGHLightParameters& Parameters = ReconstructionLight->Parameters;
+		Updated.ReconstructionLight.WavelengthM = CGHUnits::NmToM(Parameters.WavelengthNm);
+		Updated.ReconstructionLight.Amplitude = Parameters.Amplitude;
+		Updated.ReconstructionLight.InitialPhaseRad = Parameters.InitialPhaseRad;
+		Updated.ReconstructionLight.DirectionSLM = LocalDirection(ReconstructionLight->GetPropagationDirection());
+		Updated.ReconstructionLight.SourceType = Parameters.SourceType;
+		Updated.ReconstructionLight.PositionSLMM = LocalPositionMeters(ReconstructionLight->GetActorLocation());
+		Updated.ReconstructionLight.PolarizationAngleRad = FMath::DegreesToRadians(Parameters.PolarizationAngleDeg);
+	}
+
+	bool bHasAllTargets = !Targets.IsEmpty();
+	Updated.Targets.Reserve(Targets.Num());
+	for (const ACGHTargetActor* Target : Targets)
+	{
+		// Retain array indices even when a reference is missing; completeness reports it.
+		FCGHTargetDescription& Description = Updated.Targets.AddDefaulted_GetRef();
+		if (!IsSceneActorAvailable(Target))
+		{
+			bHasAllTargets = false;
+			continue;
+		}
+		Description.PositionSLMM = LocalPositionMeters(Target->GetActorLocation());
+		Description.Amplitude = Target->Parameters.Amplitude;
+		Description.PhaseRad = Target->Parameters.InitialPhaseRad;
+		Description.TargetType = Target->Parameters.TargetType;
+	}
+
+	bSceneDescriptionComplete = bHasCamera && bHasLight && bHasAllTargets;
+	SceneDescription = MoveTemp(Updated);
+}
+
+void ACGHWorkbenchActor::RefreshSceneObservers()
+{
+	TArray<TWeakObjectPtr<AActor>> Actors;
+	TArray<TWeakObjectPtr<USceneComponent>> Components;
+	const auto ObserveActor = [this, &Actors, &Components](AActor* Actor)
+	{
+		if (IsSceneActorAvailable(Actor))
+		{
+			Actors.AddUnique(Actor);
+			if (USceneComponent* Component = Actor->GetRootComponent())
+			{
+				Components.AddUnique(Component);
+			}
+		}
+	};
+	ObserveActor(SLM);
+	ObserveActor(Camera);
+	ObserveActor(ReconstructionLight);
+	for (ACGHTargetActor* Target : Targets)
+	{
+		ObserveActor(Target);
+	}
+	if (IsSceneActorAvailable(Camera) && IsValid(Camera->GetOpticalReference()))
+	{
+		Components.AddUnique(Camera->GetOpticalReference());
+	}
+
+	if (Actors == ObservedActors && Components == ObservedComponents)
+	{
+		return;
+	}
+
+	RemoveSceneObservers();
+	ObservedActors = MoveTemp(Actors);
+	ObservedComponents = MoveTemp(Components);
+	for (const TWeakObjectPtr<AActor>& Actor : ObservedActors)
+	{
+		Actor->OnDestroyed.AddUniqueDynamic(this, &ACGHWorkbenchActor::OnSceneActorDestroyed);
+	}
+	for (const TWeakObjectPtr<USceneComponent>& Component : ObservedComponents)
+	{
+		Component->TransformUpdated.AddUObject(this, &ACGHWorkbenchActor::OnSceneTransformUpdated);
+	}
+}
+
+void ACGHWorkbenchActor::RemoveSceneObservers()
+{
+	for (const TWeakObjectPtr<AActor>& Actor : ObservedActors)
+	{
+		if (Actor.IsValid())
+		{
+			Actor->OnDestroyed.RemoveDynamic(this, &ACGHWorkbenchActor::OnSceneActorDestroyed);
+		}
+	}
+	for (const TWeakObjectPtr<USceneComponent>& Component : ObservedComponents)
+	{
+		if (Component.IsValid())
+		{
+			Component->TransformUpdated.RemoveAll(this);
+		}
+	}
+	ObservedActors.Reset();
+	ObservedComponents.Reset();
+}
+
+void ACGHWorkbenchActor::OnSceneTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport)
+{
+	UpdateSceneDescription();
+}
+
+void ACGHWorkbenchActor::OnSceneActorDestroyed(AActor* Actor)
+{
+	UpdateSceneDescription();
+}
+
+#if WITH_EDITOR
+bool ACGHWorkbenchActor::IsSceneObject(const UObject* Object) const
+{
+	if (!IsValid(Object) || Object->IsTemplate())
+	{
+		return false;
+	}
+	const AActor* Actor = Cast<AActor>(Object);
+	if (!Actor)
+	{
+		Actor = Object->GetTypedOuter<AActor>();
+	}
+	return Actor && (Actor == this || Actor == SLM || Actor == Camera || Actor == ReconstructionLight
+		|| Targets.Contains(Actor));
+}
+
+void ACGHWorkbenchActor::OnSceneObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& Event)
+{
+	if (IsSceneObject(Object))
+	{
+		UpdateSceneDescription();
+	}
+}
+
+void ACGHWorkbenchActor::OnSceneObjectTransacted(UObject* Object, const FTransactionObjectEvent& Event)
+{
+	if (IsSceneObject(Object))
+	{
+		UpdateSceneDescription();
+	}
+}
+#endif
+
 bool ACGHWorkbenchActor::ValidateScene()
 {
+	UpdateSceneDescription();
 	ValidationMessages.Reset();
 
 	const auto Check = [this](bool bCondition, const FString& Message)

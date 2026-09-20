@@ -58,11 +58,11 @@ def expect_validation(workbench, valid, diagnostic=""):
 
 def check_defaults(slm, target, camera, light):
     defaults = (
-        (slm, {"resolution_x": 1024, "resolution_y": 1024,
+        (slm, {"resolution_x": 4096, "resolution_y": 4096,
                "pixel_pitch_x_um": 8.0, "pixel_pitch_y_um": 8.0}),
         (target, {"amplitude": 1.0, "initial_phase_rad": 0.0}),
         (camera, {"focal_length_mm": 50.0, "f_number": 4.0,
-                  "focus_distance_mm": 1000.0, "sensor_width_mm": 36.0,
+                  "focus_distance_mm": 500.0, "sensor_width_mm": 36.0,
                   "sensor_height_mm": 24.0, "output_resolution_x": 1920,
                   "output_resolution_y": 1080}),
         (light, {"wavelength_nm": 532.0, "amplitude": 1.0,
@@ -73,8 +73,8 @@ def check_defaults(slm, target, camera, light):
         for name, value in expected.items():
             near(parameters.get_editor_property(name), value,
                  f"{actor.get_name()}.{name}")
-    near(slm.get_active_width_mm(), 8.192, "Default SLM width in mm")
-    near(slm.get_active_height_mm(), 8.192, "Default SLM height in mm")
+    near(slm.get_active_width_mm(), 32.768, "Default SLM width in mm")
+    near(slm.get_active_height_mm(), 32.768, "Default SLM height in mm")
     check(slm.get_editor_property("generation_state") ==
           unreal.CGHGenerationState.NOT_IMPLEMENTED, "SLM must remain unimplemented")
     check(not slm.get_editor_property("has_phase_data"), "SLM must have no phase data")
@@ -116,8 +116,16 @@ def inspect_saved_scene(assets, actors, level_editor):
           targets[0].get_class() == classes["BP_CGHTargetPoint"],
           "Persisted target reference must point to the target Blueprint in the map")
     check_defaults(refs["slm"], targets[0], refs["camera"], refs["reconstruction_light"])
-    vector_near(targets[0].get_optical_position_meters(refs["slm"]),
-                (0.5, 0.0, 0.0), "Persisted target position in SLM-local meters")
+    # Loading the map must initialize the transient snapshot without a manual refresh.
+    # The saved target may have been moved since the starter scene was generated.
+    description = workbench.get_editor_property("scene_description")
+    check(description.schema_version == 1, "Scene snapshot schema version")
+    check(workbench.get_editor_property("scene_description_complete"),
+          "Saved references must automatically produce a complete scene snapshot")
+    exported_position = targets[0].get_optical_position_meters(refs["slm"])
+    vector_near(description.targets[0].position_slmm,
+                (exported_position.x, exported_position.y, exported_position.z),
+                "Snapshot target position matches saved SLM-local optical pose")
     unreal.log("CGH smoke: saved Blueprint parents, references, and defaults passed")
     return classes
 
@@ -182,7 +190,7 @@ def inspect_temporary_scene(classes, actors):
 
     preview = camera.get_editor_property("preview_camera")
     near(preview.get_editor_property("focus_settings").manual_focus_distance,
-         100.0, "Default camera focus converts mm to cm")
+         50.0, "Default camera focus converts mm to cm")
     for name, value in (("focal_length_mm", 8.0), ("f_number", 0.7),
                         ("focus_distance_mm", 250.0), ("sensor_width_mm", 12.0),
                         ("sensor_height_mm", 8.0)):

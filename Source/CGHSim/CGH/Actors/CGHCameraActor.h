@@ -28,6 +28,14 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Camera")
 	void RefreshVisualization();
 
+	/** World-space lens pose used when exporting the optical scene description. */
+	UFUNCTION(BlueprintPure, Category = "CGH|Camera")
+	FTransform GetOpticalTransform() const;
+
+	/** Lens reference whose transform drives optical scene updates. */
+	UFUNCTION(BlueprintPure, Category = "CGH|Camera")
+	USceneComponent* GetOpticalReference() const;
+
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CGH|Components")
 	TObjectPtr<USceneComponent> Root;

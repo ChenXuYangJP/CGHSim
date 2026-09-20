@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CGH/Types/CGHTypes.h"
 #include "GameFramework/Actor.h"
 #include "CGHWorkbenchActor.generated.h"
 
@@ -21,6 +22,10 @@ public:
 	ACGHWorkbenchActor();
 
 	virtual void OnConstruction(const FTransform& Transform) override;
+	virtual void PostRegisterAllComponents() override;
+	virtual void PostUnregisterAllComponents() override;
+	virtual void Tick(float DeltaSeconds) override;
+	virtual bool ShouldTickIfViewportsOnly() const override { return true; }
 
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
 	TObjectPtr<ACGHSLMActor> SLM;
@@ -33,6 +38,18 @@ public:
 
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
 	TArray<TObjectPtr<ACGHTargetActor>> Targets;
+
+	/** Derived SI data in the SLM's unscaled local coordinate system. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Scene")
+	FCGHSceneDescription SceneDescription;
+
+	/** All references are available in this world; physical validity still requires ValidateScene. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Scene")
+	bool bSceneDescriptionComplete = false;
+
+	/** Refresh immediately when consuming data in the same frame as direct parameter writes. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Scene")
+	void UpdateSceneDescription();
 
 	/** Result of the most recent explicit validation, not a solver result. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Validation")
@@ -52,6 +69,8 @@ public:
 	void RefreshVisualization();
 
 protected:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CGH|Components")
 	TObjectPtr<USceneComponent> Root;
 
@@ -59,4 +78,23 @@ protected:
 	TObjectPtr<UTextRenderComponent> Label;
 
 	void UpdateStatusLabel();
+
+private:
+	bool IsSceneActorAvailable(const AActor* Actor) const;
+	void RefreshSceneObservers();
+	void RemoveSceneObservers();
+	void OnSceneTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport);
+
+	UFUNCTION()
+	void OnSceneActorDestroyed(AActor* Actor);
+
+	TArray<TWeakObjectPtr<AActor>> ObservedActors;
+	TArray<TWeakObjectPtr<USceneComponent>> ObservedComponents;
+	bool bUpdatingSceneDescription = false;
+
+#if WITH_EDITOR
+	bool IsSceneObject(const UObject* Object) const;
+	void OnSceneObjectPropertyChanged(UObject* Object, FPropertyChangedEvent& Event);
+	void OnSceneObjectTransacted(UObject* Object, const FTransactionObjectEvent& Event);
+#endif
 };
