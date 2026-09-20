@@ -4,14 +4,14 @@
 
 CGHSim provides an editable scene for arranging a target, spatial light modulator (SLM), camera, and reconstruction light. Native C++ actors define optical parameters and validation; Blueprint children provide scene presentation.
 
-**Current milestone:** actor scaffolding and a saved workbench scene. Hologram generation, wave propagation, and optical reconstruction are not yet implemented. The camera currently shows a standard Unreal geometry preview.
+**Current milestone:** automatic SI scene descriptions, versioned mesh/point-cloud targets, and an SLM phase-pattern editor preview. Hologram generation, wave propagation, and optical reconstruction are not yet implemented. The camera currently shows a standard Unreal geometry preview.
 
 ## What works today
 
 | Component | Current capabilities |
 | --- | --- |
-| **Target** | Mathematical point parameters, an independently sized visual marker, and position export in SLM-local meters. |
-| **SLM** | Editable pixel resolution and pitch, derived physical active area, a normal arrow, and explicit `NotImplemented` generation status. |
+| **Target** | Point or static-mesh targets, configurable contour slicing and point spacing, versioned geometry/point-cloud resources, and a cached debug point-cloud view. |
+| **SLM** | Editable resolution/pitch and physical active area, validated transient phase storage, and an exact-resolution grayscale preview on selection. Includes explicit test-ramp and clear controls. |
 | **Camera** | Double-precision optical parameters synchronized to a Cine Camera preview, including focal length, aperture, sensor dimensions, and focus distance. |
 | **Reconstruction light** | Source type, wavelength, amplitude, phase, polarization, and propagation direction. |
 | **Workbench** | Explicit actor references, an automatically updated SI scene description, configuration validation, and visualization refresh controls. |
@@ -65,9 +65,10 @@ In the editor:
 1. Select the CGH actors in the World Outliner and press **F** to frame them.
 2. Edit each actor's optical parameters in the **CGH** sections of the Details panel.
 3. Select **CGH Workbench** to inspect the automatically updated **Scene Description**, or click **Validate Scene** or **Refresh Visualization**.
-4. Save the level to preserve parameter and placement changes.
+4. Select the SLM for its phase inset; click **CGH > Phase > Load Stored Phase Pattern** to activate the bundled saved sample, or **Clear Phase Pattern** to remove it. **Generate Preview Phase Ramp** provides another display check. These samples do not run a solver.
+5. Save the level to preserve parameter and placement changes. Phase data is transient and must be supplied again after reopening.
 
-The SLM is shown at its physical dimensions: the native default `4096 × 4096` pixels at `8 µm` pitch produce an active area of **32.768 × 32.768 mm**. Frame the SLM separately for a close view. The target sphere is a selection marker, not the physical extent of the mathematical point.
+The SLM is shown at its physical dimensions: the native default `4096 × 4096` pixels at `8 µm` pitch produce an active area of **32.768 × 32.768 mm**. Frame the SLM separately for a close view. Its phase inset scales to a readable size independently of physical pitch; **Camera Preview Size** controls the inset size. For point targets, the sphere is a selection marker rather than the mathematical point's physical extent. Mesh targets use their assigned static mesh and support **Show Point Cloud**.
 
 The checked-in [VS Code workspace](CGHSim.Dev.code-workspace) contains paths for the original development machine. Adjust its project/engine paths and desktop environment configuration before using it elsewhere. The [environment setup notes](Docs/CGHSim_开发进度记录_2026-09-19.md) describe the Remote SSH and Moonlight workflow.
 
@@ -80,8 +81,10 @@ CGHSim/
 │   ├── CGHSim.Build.cs
 │   └── CGH/
 │       ├── Actors/                  # Target, SLM, camera, light, workbench
-│       ├── Types/CGHTypes.h         # Reflected enums and optical parameters
-│       └── Utils/CGHUnitConversion.h
+│       ├── Components/              # Point-cloud rendering and SLM phase preview
+│       ├── Types/                   # Optical descriptions, resources, phase pattern
+│       ├── Utils/                   # Unit conversion, mesh sampling, phase grayscale
+│       └── Tests/                   # Headless and Slate-render automation
 ├── Content/CGHSim/
 │   ├── Blueprints/                 # Five Blueprint children
 │   ├── Materials/                  # Reserved for custom materials
@@ -98,13 +101,13 @@ CGHSim/
 
 - Unreal scene positions use **centimeters**; optical fields have explicit unit suffixes, and optical scalar parameters use `double`.
 - SLM local **+X** is optical forward, **+Y** is horizontal, and **+Z** is vertical. The active area lies in the local **YZ plane**.
-- Keep optical actor scales at **(1, 1, 1)**. Resize visual child components instead; SLM active dimensions are driven by resolution and pixel pitch.
-- Scene-description positions apply the SLM actor's inverse translation and rotation, then convert centimeters to meters. Reference scale is ignored and non-unit actor scales are rejected by workbench validation.
+- Keep SLM, camera and light actor scales at **(1, 1, 1)**. Mesh targets support nonuniform/mirrored scale; their resource coordinates already include it. SLM physical dimensions derive from resolution and pixel pitch.
+- Scene-description positions apply the SLM actor's inverse translation and rotation, then convert centimeters to meters. SLM reference scale is ignored. Mesh-target scale is baked into target-local geometry and point resources once.
 - Camera parameters drive the Cine Camera preview in one direction. Output resolution is currently stored as configuration data; it does not produce a sensor image.
 
-`FCGHSceneDescription` has `SchemaVersion = 1` and separate read-only SLM, reconstruction-light, target, and camera descriptions. All lengths and positions use meters; phases and polarization use radians. Positions and unit directions use the SLM-local frame, and the camera pose comes from its `OpticalReference` component. Editable actor parameters keep their existing mm, µm, nm, and degree units.
+`FCGHSceneDescription` has `SchemaVersion = 2` and separate read-only SLM, reconstruction-light, target, and camera descriptions. All lengths and positions use meters; phases and polarization use radians. Positions and unit directions use the SLM-local frame, and the camera pose comes from its `OpticalReference` component. Editable actor parameters keep their existing mm, µm, nm, and degree units.
 
-The workbench's transient **Scene Description** updates after editor property changes, undo/redo, transforms, reference changes, and actor deletion. Runtime polling runs in the post-update tick; call **Update Scene Description** when code needs the snapshot immediately after a same-frame parameter write. **Scene Description Complete** means all required actor references are present; use **Validate Scene** separately to check physical validity. Runtime visualization still uses **Refresh Visualization**. No update runs an optical solver.
+The workbench's transient **Scene Description** updates after editor property changes, undo/redo, transforms, reference changes, and actor deletion. Runtime polling runs in the post-update tick; call **Update Scene Description** when code needs the snapshot immediately after a same-frame parameter write. **Scene Description Complete** means all required actor references are present; use **Validate Scene** separately to check physical validity. Target resources/debug display update automatically. SLM phase publication and resolution changes update its preview; other runtime presentation edits can use **Refresh Visualization**. No update runs an optical solver.
 
 ## Asset generation and checks
 
@@ -136,16 +139,23 @@ A successful run logs `CGH_SCAFFOLD_SMOKE_OK`. Checks cover saved references, pa
 
 The saved-scene checks expect the starter defaults. If you intentionally modify that fixture, update the expectations or maintain a separate test map.
 
-Run the C++ scene-description automation tests after building the Editor target:
+Run the headless CGH automation tests after building the Editor target:
 
 ```bash
 "$CGHSIM_UE_ROOT/Engine/Binaries/Linux/UnrealEditor-Cmd" \
   "$CGHSIM_PROJECT_ROOT/CGHSim.uproject" \
-  -ExecCmds="Automation RunTests CGH.SceneDescription; Quit" \
+  -ExecCmds="Automation RunTests CGH; Quit" \
   -unattended -nullrhi -nosplash
 ```
 
 ### Recorded verification
+
+**2026-09-21 — mesh targets and SLM phase preview:**
+
+- Editor and Game Linux Development builds passed.
+- All 26 headless CGH tests passed, including saved-pattern serialization and activation. A separate earlier Vulkan/Slate test verified the rendered phase grid's grayscale values and row order.
+- The bundled 256-by-256 sample asset was saved and reloaded from disk. The existing `BP_CGHSLM` inherited its reference and passed load/clear/reload checks; native default 4096-by-4096 activation also passed.
+- Reports, screenshot, usage, and the real-RHI test command are documented in [SLM preview usage and verification](Docs/CGH_Actor_Scaffold.md#slm-phase-data-and-selected-actor-preview). Only the new phase sample asset was saved; all pre-existing assets/maps were preserved.
 
 **2026-09-20 — SI scene description:**
 
@@ -156,16 +166,16 @@ Run the C++ scene-description automation tests after building the Editor target:
 
 **2026-09-19 — actor scaffold:** headless asset creation and map reload passed; repeated asset generation preserved all six Blueprint/map files byte for byte.
 
-Graphical acceptance, interactive Simulation and undo/redo, cooking, packaging, and standalone deployment remain to be verified. Transaction callbacks and game-world ticks are covered by the headless tests.
+Full workbench graphical acceptance, interactive Simulation and undo/redo, cooking, packaging, and standalone deployment remain to be verified. The SLM widget itself has passed the separate render check. Transaction callbacks and game-world ticks are covered by the headless tests.
 
 ## Roadmap
 
 1. Complete visual acceptance of the workbench and verify interactive Simulation.
 2. Establish a Linux cook/package checkpoint.
 3. Choose a first optical calculation and implement a verified numerical reference case.
-4. Add phase/result visualization and an external solver interface.
+4. Feed computed phases into the existing SLM preview, then add reconstruction-result visualization, solver job states, and an external solver interface.
 
-GS/FFT propagation, mesh sampling, camera sensor simulation, GPU solver integration, and runtime parameter controls remain future scope. See the handoff for proposed ordering and acceptance criteria.
+GS/FFT propagation, camera sensor simulation, GPU solver integration, and runtime parameter controls remain future scope. See the handoff for proposed ordering and acceptance criteria.
 
 ## Documentation
 

@@ -7,7 +7,7 @@ This implements the editable scene structure from the [shared design](https://ch
 | Native class | Blueprint | Role |
 | --- | --- | --- |
 | `ACGHTargetActor` | `BP_CGHTargetPoint` | Point or static-mesh target, versioned geometry/point cloud, and debug preview |
-| `ACGHSLMActor` | `BP_CGHSLM` | Pixel resolution/pitch, derived active area and explicit placeholder state |
+| `ACGHSLMActor` | `BP_CGHSLM` | Pixel resolution/pitch, derived active area, versioned phase storage, and selected-actor phase preview |
 | `ACGHCameraActor` | `BP_CGHCamera` | Double-precision optical parameters driving a Cine Camera geometry preview |
 | `ACGHReconstructionLightActor` | `BP_CGHReconstructionLight` | Wavelength, amplitude, phase, polarization and propagation direction |
 | `ACGHWorkbenchActor` | `BP_CGHWorkbench` | Explicit actor references, automatic SI snapshot updates, validation and refresh buttons |
@@ -34,7 +34,7 @@ The starter map places the SLM at `(0,0,0)` cm, the target at `(50,0,0)` cm, the
 - Target `MarkerRadiusCm` affects only the visual sphere, never the mathematical point. Point targets ignore mesh and sampling settings and keep both geometry resources empty.
 - Light +X is its propagation direction. The reconstruction-light actor contains no UE illumination component.
 - Camera optical parameters flow one way into `PreviewCamera`. `OpticalReference` supplies the exported optical position and forward direction, including component offsets. Output resolution is independent of both filmback aspect and SLM resolution, and is currently stored only.
-- SLM `GenerationState` remains `NotImplemented`, `HasPhaseData` remains false, and the label identifies a placeholder generator.
+- An SLM starts with `GenerationState = NotImplemented` and `HasPhaseData = false`. Publishing valid phase data changes the state to `Ready`; this indicates stored data, while optical generation remains unimplemented. Clearing the data restores the initial state.
 
 ## Scene description and updates
 
@@ -73,6 +73,24 @@ Resource vertices and points use meters in the target actor's rigid local frame.
 Construction, BeginPlay, transform/property/transaction callbacks, and an input comparison each tick keep resources current. Direct C++/Blueprint writes and mesh swaps are caught on the next tick; call **Update Target Resources** before an immediate same-frame read. **Rebuild Target Resources** forces an update after custom runtime edits to mesh data. The workbench refreshes targets before publishing its snapshot and retains their IDs/revisions; it does not copy large geometry arrays into the scene description. `bResourcesValid` and `ResourceError` expose failures. Failed mesh updates stamp the new revision and clear both resource arrays so a consumer cannot reuse stale points.
 
 For cooked runtime sampling, enable **Allow CPU Access** on each source mesh before cooking and keep LOD 0 resident (disable mesh LOD streaming if necessary). Enabling CPU access after buffers have been discarded cannot recover them. Missing CPU data, unavailable LOD 0, zero scale, invalid sampling inputs, and excessive point/work counts produce an explicit error. Async mesh compilation retries when completed. Cooked runtime rendering still needs a separate packaging check; headless tests do not verify viewport appearance.
+
+## SLM phase data and selected-actor preview
+
+Select an SLM actor to show its phase pattern in the editor's native picture-in-picture panel, like the camera preview. The panel is supplied by `UCGHSLMPreviewComponent`; no camera or SceneCapture is needed. If selected-actor previews are disabled, enable **Preview Selected Cameras** in the level-editor viewport preferences. **Camera Preview Size** controls the inset size; the displayed image retains its pixel-grid aspect ratio. A new SLM shows **No phase pattern** against a dark background, without allocating or pretending to have a zero-phase hologram.
+
+A saved sample is included at **`/Game/CGHSim/PhasePatterns/DA_SLMPreviewPattern`**. After rebuilding and restarting the editor, select the SLM and click **CGH > Phase > Load Stored Phase Pattern**. The actor's **Stored Phase Pattern** field selects this asset by default. It contains a 256-by-256 grid with horizontal/vertical ramps, rings, a checkerboard, and a bright top-left orientation marker. Loading uses nearest-neighbor sampling to produce exactly the SLM's current resolution, without changing resolution, pixel pitch, or physical dimensions. **Clear Phase Pattern** removes active data while keeping the saved asset available for another load. The sample persists as a DataAsset; active actor phase data remains transient.
+
+`UCGHPhasePatternAsset` serializes its phase samples outside the Details property tree. Use `SetPattern()` to populate an asset and `GetPattern()` for C++ read access. Invalid payloads are rejected, and failed activation leaves the previous valid actor pattern intact. Asset labels and the preview flag identify the loaded source. Existing assets are preserved by `Scripts/create_cgh_phase_sample.py`; run it inside Unreal like the other setup scripts if the bundled sample needs to be recreated. Only a newly created sample asset is saved by that script.
+
+For a separate generated display check, click **Generate Preview Phase Ramp** under **CGH > Phase**. It creates a horizontal ramp with sample `2*pi*X/ResolutionX`, repeated on every row, and labels the result **Preview test ramp**. This button does not run a CGH solver. **Clear Phase Pattern** removes the samples and returns the panel to its empty state.
+
+To publish solver or imported data, construct `FCGHSLMPhasePattern` from `CGH/Types/CGHSLMPhasePattern.h` and call `SetPhasePattern` in C++ or Blueprint. Set `ResolutionX`, `ResolutionY`, and exactly `ResolutionX * ResolutionY` finite `double` phase values in radians. Storage is row-major: `PhaseRad[Y * ResolutionX + X]`, with row zero at the top. Dimensions must match the SLM parameters. Input is limited to 16,384 pixels per axis and 67,108,864 total pixels; the graphics device may impose a smaller preview-texture limit. Invalid input returns false, sets `PhasePatternError`, and preserves the previous valid pattern. The actor owns a copy of accepted data; the incoming revision is ignored.
+
+C++ consumers can read `GetPhasePattern()` without copying the array and compare `GetPhasePatternRevision()` to their cached revision. Blueprint readers use **Get Phase Pattern Copy**, which returns an independent value; editing that copy cannot change the published buffer or bypass `SetPhasePattern` validation and revision updates. Revisions advance when phase samples change, when existing data is cleared, or when resolution changes. Publishing identical samples and repeatedly selecting the actor retain the revision. Publishing external data clears the demo label even when its samples match the preview ramp. Phase storage is transient and is not saved with the map.
+
+Changing pixel pitch preserves phase samples, because it changes physical size rather than the pixel grid. Changing either resolution clears mismatched samples; editor/runtime ticks catch direct parameter writes, and C++ code can call `SynchronizePhasePattern()` before consuming data in the same frame. **Refresh Visualization** preserves a valid pattern. `HasValidPhasePattern()` confirms that the current samples still match the current grid.
+
+The preview texture has exactly one texel per SLM pixel and uses nearest-neighbor display scaling, preserving the pixel-grid aspect ratio independently of physical pitch. Phase wraps into `[0, 2*pi)` and maps linearly to grayscale: zero and whole cycles are black, pi is mid-gray, and values approaching 2*pi are white. Negative phases wrap the same way. Texture bytes use linear BGRA8 with gamma conversion disabled. The texture is updated only after its phase revision or grid changes; unchanged selection reuses it. The full phase array stays out of the Details tree and undo transactions, avoiding per-pixel property rows. The preview component and its texture are editor-only; runtime phase storage is available to future solvers and output devices.
 
 ## Recreate assets and verify
 
@@ -115,7 +133,21 @@ Run the C++ scene-description automation tests after building:
   -unattended -nullrhi -nosplash
 ```
 
+The grayscale render check requires a real graphics device and can run without opening an editor window:
+
+```bash
+/home/cxy/opt/UnrealEngine/UE5/Engine/Binaries/Linux/UnrealEditor \
+  "$PWD/CGHSim.uproject" -RenderOffscreen -unattended -nosplash -nosound \
+  -ExecCmds="Automation RunTests CGH.SLMPhasePattern.RenderedPreviewPreservesGrayscale; Quit"
+```
+
+It renders the actual phase widget in an isolated Slate window, checks displayed grayscale and row order, and saves `Saved/Automation/CGHSLMPreview/SLMPhasePreview.png`. The test is excluded under NullRHI. The native selection/discovery and texture-cache tests run headlessly.
+
 ## Verified in this workspace
+
+The stored-sample follow-up on **2026-09-21** passed both Editor and Game builds and all **26 headless CGH tests** (exit code 0). Added tests cover saved payload ownership/serialization, nearest-neighbor resizing, activation/reload, invalid-load preservation, and unchanged SLM physical settings. The new `DA_SLMPreviewPattern` asset was saved, reloaded in a fresh Unreal process, and activated through the existing `BP_CGHSLM` at 32-by-16 and through the native actor at its default 4096-by-4096 resolution. Repeat setup preserved the asset bytes. Hashes confirmed all 10 pre-existing assets/maps were unchanged. Reports are in `Saved/Automation/CGHStoredPhasePattern`; build/setup/smoke logs are `Saved/Logs/CGHStoredPhase*2026-09-21.log`. The earlier real-RHI render check below remains the evidence for the unchanged grayscale drawing path.
+
+On **2026-09-21**, the SLM phase preview passed both Editor and Game Development builds, all **21 headless `CGH` automation tests**, and the separate **Vulkan/Slate render test**, each with exit code 0. The rendered 4-by-2 grid retained gray levels 0, 64, 128, and 255 in the correct row order. A no-save smoke check also verified that the existing `BP_CGHSLM` inherits the active preview component and supports phase publication, readback, demo generation, and clearing. Reports are in `Saved/Automation/CGHSLMPreview` and `Saved/Automation/CGHSLMPreviewRender`; the rendered screenshot is alongside the headless report. No project assets or maps were saved. Restart the editor after rebuilding to load the new native preview component.
 
 On **2026-09-21**, the selection-performance fix passed both Editor and Game Development builds and all **14 `CGH` automation tests** (exit code 0). The new selection test uses Unreal's editor selection and Details property-row generator with 3,264 cached points, verifies that bulk arrays produce no Details trees, checks the displayed counts, and confirms that repeated selection/deselection preserves resource revisions and buffer storage. Full resources remain accessible through reflection and Blueprint. The report is in `Saved/Automation/CGHTargetSelection`.
 
