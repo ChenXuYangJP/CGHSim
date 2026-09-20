@@ -119,7 +119,7 @@ def inspect_saved_scene(assets, actors, level_editor):
     # Loading the map must initialize the transient snapshot without a manual refresh.
     # The saved target may have been moved since the starter scene was generated.
     description = workbench.get_editor_property("scene_description")
-    check(description.schema_version == 1, "Scene snapshot schema version")
+    check(description.schema_version == 2, "Scene snapshot schema version")
     check(workbench.get_editor_property("scene_description_complete"),
           "Saved references must automatically produce a complete scene snapshot")
     exported_position = targets[0].get_optical_position_meters(refs["slm"])
@@ -230,19 +230,47 @@ def inspect_temporary_scene(classes, actors):
         (camera, "output_resolution_y", 0, "output resolutions"),
         (target, "amplitude", -1.0, "amplitude"),
         (target, "initial_phase_rad", float("nan"), "phase"),
-        (target, "target_type", unreal.CGHTargetType.MESH, "not implemented"),
+        (target, "target_type", unreal.CGHTargetType.MESH, "Assign a static mesh"),
     )
     for actor, name, value, diagnostic in invalid_parameters:
         previous = set_parameter(actor, name, value)
         expect_validation(workbench, False, diagnostic)
         set_parameter(actor, name, previous)
-    for actor in (slm, camera, light, target):
+    for actor in (slm, camera, light):
         actor.set_actor_scale3d(unreal.Vector(2.0, 3.0, 4.0))
         expect_validation(workbench, False, "actor scale")
         if actor == slm:
             vector_near(target.get_optical_position_meters(slm), expected_position,
                         "Reference scale must not distort exported distances")
         actor.set_actor_scale3d(unreal.Vector(1.0, 1.0, 1.0))
+    # Mesh targets use physical actor/component scale and expose generated resources.
+    target.set_actor_scale3d(unreal.Vector(2.0, 3.0, 4.0))
+    expect_validation(workbench, True)
+    geometry = target.get_editor_property("geometry_mesh")
+    cube = unreal.load_asset("/Engine/BasicShapes/Cube.Cube")
+    check(cube is not None, "Could not load mesh sampling fixture")
+    # Commandlets run this script synchronously, without an editor tick to finish async assets.
+    unreal.SystemLibrary.execute_console_command(target, "Editor.AsyncStaticMeshCompilationFinishAll")
+    geometry.set_static_mesh(cube)
+    target.set_editor_property("slice_count", 4)
+    target.set_editor_property("point_spacing_mm", 50.0)
+    set_parameter(target, "target_type", unreal.CGHTargetType.MESH)
+    target.update_target_resources()
+    expect_validation(workbench, True)
+    cloud = target.get_editor_property("point_cloud_resource")
+    check(len(cloud.get_editor_property("points")) > 0,
+          "Mesh target must generate contour samples")
+    target.set_editor_property("show_point_cloud", True)
+    target.refresh_visualization()
+    check(not geometry.is_visible(), "Point-cloud debug view hides the static mesh")
+    target.set_editor_property("show_point_cloud", False)
+    target.refresh_visualization()
+    check(geometry.is_visible(), "Disabling point-cloud debug view restores the static mesh")
+    set_parameter(target, "target_type", unreal.CGHTargetType.POINT)
+    target.update_target_resources()
+    check(len(target.get_editor_property("point_cloud_resource").get_editor_property("points")) == 0,
+          "Point targets clear the unused mesh point cloud")
+    target.set_actor_scale3d(unreal.Vector(1.0, 1.0, 1.0))
     workbench.refresh_visualization()
     expect_validation(workbench, True)
     check(slm.get_editor_property("generation_state") ==

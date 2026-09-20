@@ -6,6 +6,7 @@
 #include "CGH/Actors/CGHTargetActor.h"
 #include "CGH/Utils/CGHUnitConversion.h"
 #include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Components/TextRenderComponent.h"
 #include "UObject/UObjectGlobals.h"
 
@@ -153,7 +154,7 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 
 	bool bHasAllTargets = !Targets.IsEmpty();
 	Updated.Targets.Reserve(Targets.Num());
-	for (const ACGHTargetActor* Target : Targets)
+	for (ACGHTargetActor* Target : Targets)
 	{
 		// Retain array indices even when a reference is missing; completeness reports it.
 		FCGHTargetDescription& Description = Updated.Targets.AddDefaulted_GetRef();
@@ -162,10 +163,17 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 			bHasAllTargets = false;
 			continue;
 		}
-		Description.PositionSLMM = LocalPositionMeters(Target->GetActorLocation());
-		Description.Amplitude = Target->Parameters.Amplitude;
-		Description.PhaseRad = Target->Parameters.InitialPhaseRad;
-		Description.TargetType = Target->Parameters.TargetType;
+		// The target owns its geometry and sampled points; the scene retains the same
+		// resource identity/revision without copying those potentially large buffers.
+		Target->SetWorkbenchSLM(SLM, this);
+		Target->UpdateTargetResources();
+		if (Target->GetReferenceSLM() != SLM)
+		{
+			bHasAllTargets = false;
+			continue; // Never publish coordinates expressed in a different SLM frame.
+		}
+		Description = Target->TargetDescription;
+		bHasAllTargets &= Target->bResourcesValid;
 	}
 
 	bSceneDescriptionComplete = bHasCamera && bHasLight && bHasAllTargets;
@@ -193,6 +201,10 @@ void ACGHWorkbenchActor::RefreshSceneObservers()
 	for (ACGHTargetActor* Target : Targets)
 	{
 		ObserveActor(Target);
+		if (IsSceneActorAvailable(Target) && IsValid(Target->GeometryMesh))
+		{
+			Components.AddUnique(Target->GeometryMesh);
+		}
 	}
 	if (IsSceneActorAvailable(Camera) && IsValid(Camera->GetOpticalReference()))
 	{
@@ -306,7 +318,7 @@ bool ACGHWorkbenchActor::ValidateScene()
 	{
 		Check(FMath::IsFinite(Value), FString::Printf(TEXT("%s must be finite."), *Name));
 	};
-	const auto CheckActor = [this, &Check](const AActor* Actor, const FString& Name)
+	const auto CheckActor = [this, &Check](const AActor* Actor, const FString& Name, bool bAllowScale = false)
 	{
 		if (!IsValid(Actor))
 		{
@@ -318,8 +330,11 @@ bool ACGHWorkbenchActor::ValidateScene()
 			FString::Printf(TEXT("%s must belong to the same world as the workbench."), *Name));
 		Check(!Actor->GetActorTransform().ContainsNaN(),
 			FString::Printf(TEXT("%s transform must contain only finite values."), *Name));
-		Check(Actor->GetActorScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER),
-			FString::Printf(TEXT("%s actor scale must be (1, 1, 1); resize visual components instead."), *Name));
+		if (!bAllowScale)
+		{
+			Check(Actor->GetActorScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER),
+				FString::Printf(TEXT("%s actor scale must be (1, 1, 1); resize visual components instead."), *Name));
+		}
 		return true;
 	};
 
@@ -358,7 +373,7 @@ bool ACGHWorkbenchActor::ValidateScene()
 	{
 		ACGHTargetActor* Target = Targets[Index];
 		const FString Name = FString::Printf(TEXT("Target[%d]"), Index);
-		if (!CheckActor(Target, Name))
+		if (!CheckActor(Target, Name, true))
 		{
 			continue;
 		}
@@ -368,8 +383,10 @@ bool ACGHWorkbenchActor::ValidateScene()
 		UniqueTargets.Add(Target);
 
 		const FCGHTargetParameters& Parameters = Target->Parameters;
-		Check(Parameters.TargetType == ECGHTargetType::Point,
-			FString::Printf(TEXT("%s must be a Point; mesh targets are not implemented."), *Name));
+		Check(Target->GetReferenceSLM() == SLM,
+			FString::Printf(TEXT("%s must use the same SLM reference as the workbench."), *Name));
+		Check(Target->bResourcesValid,
+			FString::Printf(TEXT("%s resources are invalid: %s"), *Name, *Target->ResourceError));
 		CheckNonNegative(Parameters.Amplitude, Name + TEXT(" amplitude"));
 		CheckFinite(Parameters.InitialPhaseRad, Name + TEXT(" initial phase (rad)"));
 	}

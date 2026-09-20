@@ -103,7 +103,7 @@ bool FCGHSceneDescriptionUnitsTest::RunTest(const FString& Parameters)
 
 	const FCGHSceneDescription& Description = Scene.Workbench->SceneDescription;
 	TestTrue(TEXT("Assigned actors produce a complete snapshot"), Scene.Workbench->bSceneDescriptionComplete);
-	TestEqual(TEXT("Schema version"), Description.SchemaVersion, 1);
+	TestEqual(TEXT("Schema version"), Description.SchemaVersion, 2);
 	TestEqual(TEXT("SLM resolution X"), Description.SLM.ResolutionX, 2048);
 	TestEqual(TEXT("SLM resolution Y"), Description.SLM.ResolutionY, 1080);
 	TestEqual(TEXT("Micrometers convert to meters for pitch X"), Description.SLM.PixelPitchXM, 6.4e-6, 1.0e-15);

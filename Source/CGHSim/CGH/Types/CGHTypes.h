@@ -7,7 +7,7 @@ UENUM(BlueprintType)
 enum class ECGHTargetType : uint8
 {
 	Point UMETA(DisplayName = "Point"),
-	Mesh UMETA(DisplayName = "Mesh (Sampling Not Implemented)")
+	Mesh UMETA(DisplayName = "Mesh")
 };
 
 UENUM(BlueprintType)
@@ -184,6 +184,25 @@ struct CGHSIM_API FCGHTargetDescription
 {
 	GENERATED_BODY()
 
+	/** Runtime identity shared by this actor's description, geometry and point cloud. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 ResourceId = 0;
+
+	/** The description and both resources represent the same revision. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 Revision = 0;
+
+	/** Compatibility alias of ResourceId. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 TargetId = 0;
+
+	/** Compatibility alias of PositionSLMM; also in meters. */
+	FVector3d PositionSLM = FVector3d::ZeroVector;
+
+	/** Rotation from the actor's rigid local axes to SLM-local axes; scale is baked into resources. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target")
+	FQuat RotationSLM = FQuat::Identity;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target", meta = (Units = "m"))
 	FVector PositionSLMM = FVector::ZeroVector;
 
@@ -195,6 +214,78 @@ struct CGHSIM_API FCGHTargetDescription
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target")
 	ECGHTargetType TargetType = ECGHTargetType::Point;
+
+	/** Compatibility aliases; zero for point targets, which have no geometry resources. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 GeometryResourceId = 0;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 GeometryRevision = 0;
+};
+
+/** Mesh in meters in the target actor's rigid local axes; component/actor scale is already baked in. */
+USTRUCT(BlueprintType)
+struct CGHSIM_API FCGHMeshGeometryResource
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 ResourceId = 0;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 Revision = 0;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	TArray<FVector> VerticesM;
+
+	/** Triangle-list indices; always a multiple of three. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	TArray<uint32> Indices;
+
+	/** Unit normals and UV0 have one entry per vertex, or are empty when absent. */
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	TArray<FVector3f> Normals;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	TArray<FVector2f> UVs;
+};
+
+/** One surface sample in the same scaled, rigid local frame as the mesh resource. */
+USTRUCT(BlueprintType)
+struct CGHSIM_API FCGHObjectPoint
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target", meta = (Units = "m"))
+	FVector PositionLocalM = FVector::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	FVector3f NormalLocal = FVector3f::ZeroVector;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target")
+	double Amplitude = 0.0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target", meta = (Units = "rad"))
+	double Phase = 0.0;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	FVector2f UV = FVector2f::ZeroVector;
+};
+
+/** Point cloud in meters in the target actor's rigid local axes. */
+USTRUCT(BlueprintType)
+struct CGHSIM_API FCGHPointCloudResource
+{
+	GENERATED_BODY()
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 ResourceId = 0;
+
+	UPROPERTY(VisibleAnywhere, Category = "Target")
+	uint64 Revision = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Target")
+	TArray<FCGHObjectPoint> Points;
 };
 
 /** Optical camera data in SI units; pose comes from the lens reference component. */
@@ -245,7 +336,7 @@ struct CGHSIM_API FCGHSceneDescription
 	GENERATED_BODY()
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CGH")
-	int32 SchemaVersion = 1;
+	int32 SchemaVersion = 2;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "CGH")
 	FCGHSLMDescription SLM;
