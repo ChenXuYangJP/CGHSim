@@ -101,6 +101,7 @@ CGHSim/
 
 - Unreal scene positions use **centimeters**; optical fields have explicit unit suffixes, and optical scalar parameters use `double`.
 - SLM local **+X** is optical forward, **+Y** is horizontal, and **+Z** is vertical. The active area lies in the local **YZ plane**.
+- Phase storage is `PhaseRad[row * ResolutionX + column]`: columns increase toward local **+Y**, rows toward **-Z**. `ResolutionX`/`PixelPitchXM` name the horizontal grid axis (local Y); `ResolutionY`/`PixelPitchYM` name the vertical grid axis (local Z). The [canonical pixel-coordinate rules](Docs/SLM_Pixel_Coordinates.md) define centered pixel positions and the requested +X-side front image (+Y right, +Z up), including the horizontal-mirror requirement for an ordinary Unreal camera on that side.
 - Keep SLM, camera and light actor scales at **(1, 1, 1)**. Mesh targets support nonuniform/mirrored scale; their resource coordinates already include it. SLM physical dimensions derive from resolution and pixel pitch.
 - Scene-description positions apply the SLM actor's inverse translation and rotation, then convert centimeters to meters. SLM reference scale is ignored. Mesh-target scale is baked into target-local geometry and point resources once.
 - Camera parameters drive the Cine Camera preview in one direction. Output resolution is currently stored as configuration data; it does not produce a sensor image.
@@ -179,6 +180,7 @@ GS/FFT propagation, camera sensor simulation, GPU solver integration, and runtim
 
 ## Documentation
 
+- [SLM pixel coordinates and code audit](Docs/SLM_Pixel_Coordinates.md) — indexing, physical positions, grid-axis names, and canonical front-view versus Unreal camera orientation.
 - [Actor scaffold and usage](Docs/CGH_Actor_Scaffold.md) — class responsibilities, units, editor workflow, and scripts.
 - [Development handoff and plan](Docs/CGHSim_Development_Handoff.md) — completed work, validation evidence, and next steps.
 - [Development progress and environment setup (中文)](Docs/CGHSim_开发进度记录_2026-09-19.md) — environment history, build setup, and remote desktop workflow.

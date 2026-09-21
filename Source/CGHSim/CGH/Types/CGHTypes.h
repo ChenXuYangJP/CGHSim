@@ -40,15 +40,19 @@ struct CGHSIM_API FCGHSLMParameters
 {
 	GENERATED_BODY()
 
+	/** Horizontal column count along SLM-local Y. X names the image/grid axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "1"))
 	int32 ResolutionX = 4096;
 
+	/** Vertical row count along SLM-local Z; increasing row points toward -Z. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "1"))
 	int32 ResolutionY = 4096;
 
+	/** Positive horizontal column spacing in micrometers, along SLM-local +Y. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "0.001", Units = "um"))
 	double PixelPitchXUm = 8.0;
 
+	/** Positive vertical row spacing in micrometers; row steps point along SLM-local -Z. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "0.001", Units = "um"))
 	double PixelPitchYUm = 8.0;
 
@@ -120,27 +124,37 @@ struct CGHSIM_API FCGHCameraParameters
 	int32 OutputResolutionY = 1080;
 };
 
-/** SLM sampling geometry in SI units, independent of actor scale. */
+/**
+ * SLM sampling geometry in SI units, independent of actor scale.
+ * Resolution/pitch X and Y are image/grid axes: horizontal local Y and vertical local Z.
+ * Pixel centers/order are defined by FCGHSLMPhasePattern and Docs/SLM_Pixel_Coordinates.md.
+ */
 USTRUCT(BlueprintType)
 struct CGHSIM_API FCGHSLMDescription
 {
 	GENERATED_BODY()
 
+	/** Horizontal column count along SLM-local Y. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM")
 	int32 ResolutionX = 0;
 
+	/** Vertical row count along SLM-local Z; increasing row points toward -Z. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM")
 	int32 ResolutionY = 0;
 
+	/** Positive column spacing in meters along SLM-local +Y, not optical X. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM", meta = (Units = "m"))
 	double PixelPitchXM = 0.0;
 
+	/** Positive row spacing in meters; increasing row moves along SLM-local -Z. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM", meta = (Units = "m"))
 	double PixelPitchYM = 0.0;
 
+	/** Full local Y extent: ResolutionX * PixelPitchXM, including pixel half-widths at the edges. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM", meta = (Units = "m"))
 	double ActiveWidthM = 0.0;
 
+	/** Full local Z extent: ResolutionY * PixelPitchYM, including pixel half-heights at the edges. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "SLM", meta = (Units = "m"))
 	double ActiveHeightM = 0.0;
 
@@ -325,7 +339,7 @@ struct CGHSIM_API FCGHCameraDescription
 
 /**
  * Solver snapshot using meters and radians. Positions and directions use the
- * CGHSLMActor's origin and rotation: +X optical normal, +Y horizontal, +Z vertical.
+ * CGHSLMActor's origin and rotation: +X optical normal, +Y increasing column, +Z decreasing row.
  * Position X is signed depth: positive along the normal, negative behind the SLM plane.
  * Reference actor scale is ignored, so local positions retain physical distances.
  * Descriptions for missing actors retain zero values; targets require an SLM.

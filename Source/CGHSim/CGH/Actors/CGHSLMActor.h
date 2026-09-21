@@ -13,6 +13,24 @@ class USceneComponent;
 class UStaticMeshComponent;
 class UTextRenderComponent;
 
+// Grid X / column axis maps to SLM local +Y.
+// Grid Y / row axis maps to SLM local -Z.
+//
+// Phase storage:
+//   PhaseRad[Row * ResolutionX + Column]
+//
+// Pixel-center position in the SLM local frame (meters):
+//   X = 0
+//   Y = (Column - (ResolutionX - 1) / 2.0) * PixelPitchXM
+//   Z = ((ResolutionY - 1) / 2.0 - Row) * PixelPitchYM
+//
+// Canonical image view:
+//   image right = SLM +Y
+//   image up    = SLM +Z
+//
+// A UE camera located on the SLM +X side and looking toward -X
+// sees the canonical image horizontally mirrored.
+
 /** Local +X is the optical normal; the physical active area lies in local YZ. */
 UCLASS(Blueprintable)
 class CGHSIM_API ACGHSLMActor : public AActor

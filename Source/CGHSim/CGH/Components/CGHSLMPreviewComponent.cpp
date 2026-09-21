@@ -248,6 +248,8 @@ bool UCGHSLMPreviewComponent::GetEditorPreviewInfo(float DeltaTime, FMinimalView
 		return false;
 	}
 
+	// Metadata for the native preview frame; the custom Slate widget draws the canonical
+	// image (columns toward +Y/right, rows toward -Z/down), not this world camera view.
 	ViewOut.Location = SLM->GetActorLocation();
 	ViewOut.Rotation = SLM->GetActorRotation();
 	ViewOut.FOV = 90.0f;
