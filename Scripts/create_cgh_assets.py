@@ -24,6 +24,7 @@ BLUEPRINTS = {
     "BP_CGHCamera": "CGHCameraActor",
     "BP_CGHReconstructionLight": "CGHReconstructionLightActor",
     "BP_CGHWorkbench": "CGHWorkbenchActor",
+    "BP_CGHSolver": "CGHSolverActor",
 }
 
 
@@ -103,6 +104,9 @@ def create_map(asset_subsystem, classes):
     camera = spawn(actors, classes["BP_CGHCamera"], "CGH Camera", (100.0, 0.0, 0.0), 180.0)
     light = spawn(actors, classes["BP_CGHReconstructionLight"], "CGH Reconstruction Light", (-30.0, 0.0, 0.0))
     workbench = spawn(actors, classes["BP_CGHWorkbench"], "CGH Workbench", (0.0, 30.0, 25.0))
+    solver = spawn(actors, classes["BP_CGHSolver"], "CGH Solver", (0.0, 50.0, 25.0))
+    solver.set_editor_property("workbench", workbench)
+    workbench.set_editor_property("solver", solver)
     workbench.set_editor_property("slm", slm)
     workbench.set_editor_property("camera", camera)
     workbench.set_editor_property("reconstruction_light", light)
@@ -144,6 +148,11 @@ def create_map(asset_subsystem, classes):
     validate_workbench(persisted[0])
     if len(persisted[0].get_editor_property("targets")) != 1:
         raise RuntimeError("Saved workbench target reference was not preserved.")
+    persisted_solver = persisted[0].get_editor_property("solver")
+    if persisted_solver is None or persisted_solver.get_class() != classes["BP_CGHSolver"]:
+        raise RuntimeError("Saved workbench solver reference was not preserved.")
+    if persisted_solver.get_editor_property("workbench") != persisted[0]:
+        raise RuntimeError("Saved solver workbench reference was not preserved.")
     unreal.log(f"CGHSim: created and verified {MAP_PATH}")
 
 

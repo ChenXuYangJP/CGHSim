@@ -89,9 +89,11 @@ struct CGHSIM_API FCGHLightParameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (ClampMin = "0.0"))
 	double Amplitude = 1.0;
 
+	/** PlaneWave PointFocus interprets this as incident phase at the SLM origin. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (Units = "rad"))
 	double InitialPhaseRad = 0.0;
 
+	/** Exported in radians; validated but unused by the scalar PointFocus solver. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (Units = "deg"))
 	double PolarizationAngleDeg = 0.0;
 };
@@ -171,9 +173,11 @@ struct CGHSIM_API FCGHReconstructionLightDescription
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "m"))
 	double WavelengthM = 0.0;
 
+	/** Finite, nonnegative field amplitude; does not affect scalar phase-only PointFocus. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light")
 	double Amplitude = 0.0;
 
+	/** PlaneWave incident phase at SLM-local origin; phi_inc(P) = InitialPhaseRad + k*dot(DirectionSLM, P). */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "rad"))
 	double InitialPhaseRad = 0.0;
 
@@ -184,10 +188,11 @@ struct CGHSIM_API FCGHReconstructionLightDescription
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light")
 	ECGHSourceType SourceType = ECGHSourceType::PlaneWave;
 
-	/** Point-source position in meters relative to the SLM actor origin. */
+	/** Point-source position in meters relative to the SLM actor origin; ignored for PlaneWave. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "m"))
 	FVector PositionSLMM = FVector::ZeroVector;
 
+	/** Finite angle accepted and validated, but unused by scalar PointFocus v0. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "rad"))
 	double PolarizationAngleRad = 0.0;
 };

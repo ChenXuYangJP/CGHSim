@@ -2,19 +2,19 @@
 
 Last updated: **2026-09-21**
 
-Milestone: **Versioned mesh targets, responsive point-cloud selection, and SLM phase preview**
+Milestone: **Asynchronous CPU PointFocus reference solver and SLM publication**
 
 Environment verified for this milestone: Ubuntu, installed Unreal Engine **5.8.2**, Linux Development targets.
 
-This is the continuation record for the actor scaffold, scene descriptions, target resources, and SLM phase preview. It records completed work separately from proposed next steps. Detailed usage and repeatable commands are in [CGH_Actor_Scaffold.md](CGH_Actor_Scaffold.md); earlier environment setup and the dated implementation record are in [CGHSim_开发进度记录_2026-09-19.md](CGHSim_开发进度记录_2026-09-19.md).
+This is the continuation record for the actor scaffold, scene descriptions, target resources, SLM phase preview, and CPU PointFocus solver. It records completed work separately from proposed next steps. Detailed usage and repeatable commands are in [CGH_Actor_Scaffold.md](CGH_Actor_Scaffold.md); earlier environment setup and the dated implementation record are in [CGHSim_开发进度记录_2026-09-19.md](CGHSim_开发进度记录_2026-09-19.md).
 
 ## 1. Current state
 
-The project contains five native C++ actors, their Blueprint children, shared optical parameter definitions, unit helpers, and a saved workbench map with linked actor references. Parameters can be edited, checked, and used to update scene visualization. The workbench now maintains `FCGHSceneDescription` schema version 2 automatically in the editor and at runtime, with optical poses and SI-valued parameters.
+The project contains six native C++ actors, shared optical parameter definitions, unit helpers, and a saved workbench map with the five scene Blueprint actors and linked references. The new solver can be added as a native Actor; no existing map or Blueprint has been saved for this milestone. Parameters can be edited, checked, and used to update scene visualization. The workbench now maintains `FCGHSceneDescription` schema version 2 automatically in the editor and at runtime, with optical poses and SI-valued parameters.
 
 Mesh targets now maintain versioned geometry and sampled contour-point resources, with a point-cloud debug view. Selecting a target reuses its cached resources without building bulk-array Details rows. SLM actors can load the bundled saved `DA_SLMPreviewPattern` through **Load Stored Phase Pattern**, store validated active phase grids, and display their current pattern in a scaled, grayscale editor inset using Unreal's native selected-actor preview.
 
-Hologram generation and optical reconstruction are **not implemented**. The camera provides a normal Unreal geometry preview. The SLM preview displays supplied phase samples or an explicitly generated test ramp. Scene validation confirms configuration consistency only.
+The CPU **PointFocus** reference now generates a phase-only SLM pattern for exactly one Point target with `phase_slm = wrap(target_phase - k*r - phase_incident)` under `exp(+i*k*r)` propagation. PlaneWave incident phase is `InitialPhaseRad + k*dot(DirectionSLM, pixel_position)` and is referenced to the SLM origin, independently of light position. A solver Actor snapshots the workbench, runs the numerical work asynchronously, and publishes accepted results to the existing SLM preview. Generate is manual by default, with optional automatic updates. Optical reconstruction images and sensor simulation remain unimplemented; the camera provides a normal Unreal geometry preview. See the [solver contract](CGH_PointFocus_Solver.md).
 
 ## 2. Work completed
 
@@ -24,15 +24,17 @@ Hologram generation and optical reconstruction are **not implemented**. The came
 | SLM | `ACGHSLMActor`: resolution/pitch and physical dimensions, plus transient `FCGHSLMPhasePattern` storage, validated publication, revision tracking, clear/test-ramp controls, and `UCGHSLMPreviewComponent`. Selection shows an exact-resolution grayscale texture scaled independently of physical pitch. Starts empty/`NotImplemented`; accepted phase data sets `Ready`. |
 | Camera | `ACGHCameraActor`: double-precision optical parameters, one-way Cine Camera preview synchronization, and optical pose export from `OpticalReference`, including its component offset and rotation. |
 | Reconstruction light | `ACGHReconstructionLightActor`: source type, wavelength, amplitude, phase, polarization, and local +X propagation direction. Presentation lighting is separate. |
-| Workbench | `ACGHWorkbenchActor`: explicit references, transient read-only `SceneDescription`, reference completeness, automatic editor/runtime updates, and explicit validation/visualization controls. `UpdateSceneDescription()` allows immediate consumption after same-frame parameter writes. |
+| Workbench | `ACGHWorkbenchActor`: explicit references, transient read-only `SceneDescription`, reference completeness, automatic editor/runtime updates, and validation/visualization controls. Optional `Solver` forwards Solve/Cancel and mirrors status; the solver owns jobs. `UpdateSceneDescription()` allows immediate consumption after same-frame parameter writes. |
+| Solver | `ACGHSolverActor`, `UCGHSolverBackend`, and `UCGHCPUSolverBackend`: immutable SI requests, thread-pool PointFocus calculation, one running/one latest queued request, cooperative cancellation, stale-result checks, and game-thread publication by move through `SetPhasePattern`. Docker reports unimplemented without networking. |
 | Shared definitions | `FCGHSceneDescription` has `SchemaVersion = 2` and dedicated SLM, reconstruction-light, target, and camera descriptions. Snapshot distances use meters, angles use radians, and poses use the SLM actor frame. Editable actor parameters retain their existing units. `FCGHMeshGeometryResource` and `FCGHPointCloudResource` hold target resources; `FCGHObjectPoint` carries point attributes. |
-| Assets | Five real Blueprint `.uasset` files and `L_CGHWorkbench.umap`, with floor and ordinary lighting under `Presentation`. Starter visuals use Engine meshes; mesh targets also accept assigned static-mesh assets. |
+| Assets | The five scene Blueprint `.uasset` files and `L_CGHWorkbench.umap` are preserved. The generator supports a missing `BP_CGHSolver` and connects it in new maps only; it was not executed for this milestone. Add the native solver directly to an existing map. |
 | Project setup | `CinematicCamera`, `RenderCore`, and `RHI` support camera/geometry rendering; editor-only `UnrealEd`, `PropertyEditor`, `Slate`, and `SlateCore` support editor hooks, UI, and checks. `PythonScriptPlugin` remains editor-only. Startup maps point to the workbench. |
-| Tooling | Asset creation preserves existing maps. The C++ suite now has 26 headless tests covering scene descriptions, mesh sampling, resource lifecycle/selection, and phase storage/preview caching, plus one real-RHI Slate render test. The existing SLM Blueprint also passed a no-save phase API/component smoke check. |
+| Tooling | Asset creation preserves existing maps. All 42 headless CGH tests pass, including six numerical PointFocus tests and ten solver-actor/lifecycle tests. Both builds, a no-save 4096×4096 solve/cancel, and existing Blueprint activation pass. Earlier milestones retain a separate real-RHI Slate render check. |
 
 Main locations:
 
 - Native classes: `Source/CGHSim/CGH/Actors/`.
+- Solver contract/core/backends: `Source/CGHSim/CGH/Types/CGHSolverTypes.h` and `Source/CGHSim/CGH/Solver/`; usage and assumptions: [CGH_PointFocus_Solver.md](CGH_PointFocus_Solver.md).
 - Shared definitions: `Source/CGHSim/CGH/Types/` and `Source/CGHSim/CGH/Utils/`.
 - Blueprint children: `Content/CGHSim/Blueprints/`.
 - Starter level: `Content/CGHSim/Maps/L_CGHWorkbench.umap`.
@@ -41,11 +43,11 @@ Main locations:
 - Automation tests: `Source/CGHSim/CGH/Tests/`.
 - Phase data/API: `Types/CGHSLMPhasePattern.h`, `Actors/CGHSLMActor.h`, and `Utils/CGHPhasePreview.h` under `Source/CGHSim/CGH/`.
 
-The SLM preview changes are present in the working tree. No Git commit or remote publication was performed for this milestone or this record update.
+The CPU solver changes are present in the working tree. No Git commit or remote publication was performed for this milestone or this record update.
 
 ## 3. Verification completed
 
-The latest checks below were completed on **2026-09-21** against UE 5.8.2. Earlier scaffold and scene-description evidence is retained separately.
+The CPU PointFocus milestone passed Editor and Game Linux Development builds and all **42 headless CGH tests** on **2026-09-21** against UE 5.8.2, with exit code 0 and zero test failures/warnings/not-run. A no-save 4096×4096 oblique-plane-wave solve, nonblocking cancellation, and existing SLM Blueprint activation also passed; all 11 saved assets/maps were unchanged. See the [solver verification record](CGH_PointFocus_Solver.md#verification-record) for numerical/lifecycle coverage and single-run timing measurements. The table below retains the earlier stored-phase/preview results.
 
 | Check | Recorded result |
 | --- | --- |
@@ -59,11 +61,13 @@ The latest checks below were completed on **2026-09-21** against UE 5.8.2. Earli
 | Original asset creation/repeat setup | On 2026-09-19, headless creation and reload passed; repeated setup preserved all six Blueprint/map files byte for byte. |
 | Repository whitespace check | `git diff --check` passed for the implementation and progress-record changes. |
 
-Current automation groups are `CGH.MeshSampling`, `CGH.TargetResources`, `CGH.SceneDescription`, `CGH.PhasePreview`, `CGH.SLMPhasePattern`, `CGH.PhasePatternAsset`, and `CGH.StoredPhasePattern`. Tests cover contour sampling and degenerate geometry, mirrored/nonuniform transforms, resource IDs/revisions and mesh swaps, SLM references, compact Details, signed SI coordinates, atomic phase validation, independent readback, resolution invalidation, demo labels, grayscale mapping and unchanged-selection caching. The rendered test requires a real RHI and is excluded from NullRHI runs.
+Current automation groups are `CGH.MeshSampling`, `CGH.TargetResources`, `CGH.SceneDescription`, `CGH.PhasePreview`, `CGH.SLMPhasePattern`, `CGH.PhasePatternAsset`, `CGH.StoredPhasePattern`, `CGH.Solver.PointFocus`, and `CGH.SolverActor`. Tests cover contour sampling and degenerate geometry, mirrored/nonuniform transforms, resource IDs/revisions and mesh swaps, SLM references, compact Details, signed SI coordinates, atomic phase validation, independent readback, resolution invalidation, demo labels, grayscale mapping and unchanged-selection caching. The rendered test requires a real RHI and is excluded from NullRHI runs.
 
 Local evidence:
 
-- `Saved/Automation/CGHStoredPhasePattern/index.json`: latest 26 passing headless tests.
+- `Saved/Automation/CGHPointFocus/index.json`: latest 42 passing headless tests; the same folder retains the default-grid smoke script.
+- `Saved/Logs/CGHPointFocus*2026-09-21.log`: Editor/Game builds, full tests, and no-save default-grid/cancellation/Blueprint checks.
+- `Saved/Automation/CGHStoredPhasePattern/index.json`: earlier 26 passing headless tests.
 - `Saved/Logs/CGHStoredPhase*2026-09-21.log`: final stored-sample builds, creation, tests and disk-reload smoke checks.
 - `Saved/Automation/CGHSLMPreview/index.json`: earlier 21 passing phase-preview tests.
 - `Saved/Automation/CGHSLMPreviewRender/index.json`: one passing rendered test.
@@ -86,6 +90,8 @@ The render check verifies the SLM widget's actual pixels; native selected-actor 
 - Keep SLM, camera and light actor scales at `(1,1,1)`. Mesh targets support nonuniform and mirrored actor/component scale. Mesh vertices and sampled points already include that scale in target-local meters; do not apply actor scale a second time when drawing/exporting them. SLM physical dimensions derive from resolution and pitch.
 - Current native SLM defaults are `4096 × 4096` pixels at `8 um`, giving `32.768 × 32.768 mm`. The existing user edits to these defaults and the 500 mm camera focus were preserved.
 - All scene-description positions use the SLM actor origin and rotation and ignore reference scale. Camera position and forward direction come from `OpticalReference`; light propagation follows its actor +X. Directions are unit vectors in the same SLM-local frame.
+- PointFocus propagation is explicitly `exp(+i*k*r)`, with `phase_slm = wrap(target_phase - k*r - phase_incident)`. Use `/ 2.0` for centered pixels, exactly one off-plane Point target, and a phase-only SLM. Only PlaneWave illumination is supported: `phase_incident(p) = InitialPhaseRad + k*dot(DirectionSLM,p)`, with a finite unit direction and phase referenced to the SLM origin; light position is ignored. Finite nonnegative amplitude and finite polarization angle are validated but unused. No amplitude, `1/r`, polarization-response or camera model is included. Future FFT/network implementations must preserve or deliberately convert the sign contract.
+- Solver worker input is a copied SI snapshot without UObject pointers. Only the game thread captures scene state and publishes accepted phase data. One running and one latest pending request bound the buffers; phase-revision/input/reference guards prevent obsolete publication. Cancel/failure preserves the accepted SLM data, except existing resolution invalidation.
 - Optical camera parameters drive the Cine Camera preview, not the reverse. Output image resolution currently remains configuration data only.
 - Do not interpret target-marker geometry, ordinary scene lighting, camera preview pixels, or the SLM test ramp as a computed optical result.
 - Mesh sampling uses LOD 0 (Nanite fallback render geometry), with slice planes normal to the target-to-SLM direction and spacing along intersection contours. It does not fill slice interiors or model optical occlusion. Cooked sampling requires CPU mesh access and resident LOD 0.
@@ -95,7 +101,7 @@ The render check verifies the SLM widget's actual pixels; native selected-actor 
 
 Editor property/transaction callbacks, actor/component transform observers, and actor destruction refresh the snapshot. The workbench post-update tick catches direct C++/Blueprint parameter writes and reference changes. Call `UpdateSceneDescription()` when consuming a parameter write immediately in the same frame. Target resources/debug visualization update automatically. Phase data follows its setter and dimension checks; call `SynchronizePhasePattern()` for immediate consumption after a same-frame resolution write. Other runtime presentation changes can use `RefreshVisualization()`.
 
-`bSceneDescriptionComplete` means all referenced actors are available in the same world and at least one target is present; it does not certify physical validity. `ValidateScene()` remains explicit. Missing actor descriptions are zeroed, missing target references retain zero-valued array entries, and a missing SLM clears the whole snapshot except `SchemaVersion`. Invalid physical inputs remain available for validation and must be checked before future solver use.
+`bSceneDescriptionComplete` means all referenced actors are available in the same world and at least one target is present; it does not certify physical validity. `ValidateScene()` remains explicit. Missing actor descriptions are zeroed, missing target references retain zero-valued array entries, and a missing SLM clears the whole snapshot except `SchemaVersion`. Invalid physical inputs remain available for validation. PointFocus performs its own validation of consumed inputs; camera completeness is not required for this calculation.
 
 ## 5. Proposed next steps
 
@@ -106,8 +112,8 @@ The following work remains planned. The next concrete task is **full workbench v
 | 1 | Open the workbench in the graphical editor; inspect mesh/point-cloud alignment, responsive target selection, the selected-SLM inset/test-ramp/clear controls, camera preview and Details buttons. Verify resolution versus pitch edits, then save and reopen editable parameters. | Visible parameter updates and persisted editable settings; `Validate Scene` reports a valid configuration. Transient phase/resources are regenerated or republished rather than persisted as map data. |
 | 2 | Verify the existing Simulation launch workflow. Decide how the runtime observer should navigate or view the scene, adding a presentation camera/player setup if needed. | Predictable initial viewpoint and usable simulation window through Moonlight. The optical camera should not be assumed to become the runtime view automatically. |
 | 3 | Establish a Linux cook/package checkpoint for the small scene. | A packaged build launches with the workbench and assets outside the editor workflow. Record packaging separately from C++ build success. |
-| 4 | Agree on a first optical calculation and its assumptions, then implement a minimal numerical reference case. | A documented expected result and numerical comparison, including phase convention, sampling, and units. Algorithm/backend selection remains open. |
-| 5 | Connect a validated optical calculation to `SetPhasePattern`, add solver job states and reconstruction-result visualization, then introduce an external solver interface when its contract is stable. | The existing phase preview displays computed data; numerical results and job errors are verified. Reconstruction output remains distinct from camera geometry preview. |
+| 4 | Add reconstruction-result visualization using the CPU PointFocus pattern as the first reference input. | Propagated fields match independently checked numerical expectations; reconstruction output remains distinct from camera geometry preview. |
+| 5 | Implement Docker/TCP behind `UCGHSolverBackend`, preserving the explicit propagation convention and lifecycle. | Protocol, units, errors, cancellation and numerical parity are verified against the CPU reference. |
 
 GS/FFT propagation, sensor simulation, V100/container communication, sockets/shared memory, and a runtime parameter UI remain future scope. Their order should follow the chosen optical case and deployment needs.
 
@@ -119,7 +125,8 @@ GS/FFT propagation, sensor simulation, V100/container communication, sockets/sha
 4. Inspect **Scene Description**, edit a linked actor parameter, and rotate the SLM to verify signed positions update. Run **Validate Scene** separately and use **Refresh Visualization** for runtime presentation changes.
 5. On a mesh target, compare **GeometryMesh** and **Show Point Cloud** at the same transform; check repeated selection remains responsive.
 6. Select the SLM and click **CGH > Phase > Load Stored Phase Pattern** to load the bundled saved sample. **Generate Preview Phase Ramp** is an additional generated display check. Check the inset, then **Clear Phase Pattern**. Enable **Preview Selected Cameras** if needed; **Camera Preview Size** controls display size. A new/reopened SLM has no phase data until supplied.
-7. Record the observed result and any issues here. After implementation changes, run relevant checks and update their evidence.
+7. Add native **CGH Solver Actor**, set **Workbench**, and optionally set the workbench's **Solver** reference. Use exactly one off-plane Point target, **CPU / PointFocus**, and **Generate Phase Pattern**. Check `Ready` and the SLM inset; **Auto Solve** is opt-in. Follow the [solver guide](CGH_PointFocus_Solver.md).
+8. Record the observed result and any issues here. After implementation changes, run relevant checks and update their evidence.
 
 Asset generation deliberately skips an existing map; rerunning it does not reset scene edits. The smoke script expects the starter fixture's defaults, so intentional changes to that fixture need corresponding test expectations or a separate test level. Run the smoke script headlessly because it opens a temporary world.
 
@@ -158,5 +165,15 @@ Recorded the authoritative [SLM pixel-coordinate convention](SLM_Pixel_Coordinat
 Source inspection found storage, preview upload/drawing, nearest-neighbor resampling, active dimensions and rigid scene-coordinate export compatible with the grid convention. The active mesh width is along local Y and height along local Z. The existing scene camera at +X facing -X is an ordinary geometry preview, so its horizontal orientation differs from the canonical phase image. No pixel-center optical solver or phase-textured world mesh is implemented yet; their future mapping must use the recorded center formula. This update changes records and code comments only, with no runtime behavior or asset changes.
 
 Verification: Editor Linux Development build passed; all **26 headless CGH tests passed**, exit code 0, with zero test failures, warnings or not-run tests. Report: `Saved/Automation/CGHSLMCoordinates/index.json`; build/test logs: `Saved/Logs/CGHSLMCoordinates*2026-09-21.log`. Documentation links and `git diff --check` passed. No new tests were added or real-RHI render check rerun; pixel-center/camera mapping and the symmetric render-fixture gap remain documented on the canonical page.
+
+### 2026-09-21 — CPU PointFocus reference and asynchronous solver jobs
+
+Implemented the single-point phase-only reference with explicit `exp(+i*k*r)` propagation and `wrap(target_phase - k*r - phase_incident)` output. The core uses canonical centered SLM pixels in meters and `double` distances/phases. PlaneWave illumination consumes wavelength, initial phase, and unit direction; its phase reference is the SLM origin, independent of light position. Normal incidence along ±X with zero initial phase reduces to the original formula. PointSource/unknown sources fail. Validation covers finite phase/direction, nonzero unit direction with squared-norm tolerance `1e-6`, finite nonnegative amplitude, finite polarization angle, positive wavelength/pitch/grid, an off-plane point, and phase-only modulation. Signed target X is retained. Amplitude and polarization are validated but unused; no `1/r` weighting, polarization model, reconstruction or sensor image is produced.
+
+Added `ACGHSolverActor` with CPU/Docker backend selection, PointFocus algorithm, `Idle/Queued/Running/Ready/Failed`, Generate/Cancel controls, and manual-by-default optional automatic updates. The abstract backend interface and owned plain-data request/result mailbox separate game-thread scene access from CPU work. Result metadata carries the propagation convention, and mismatches are rejected. The solver permits one running worker and one latest queued request, cooperatively cancels obsolete work, and checks inputs, actor references and SLM phase revision before publication. Accepted output moves through `SetPhasePattern`; cancel/failure leaves the last phase intact. Ending play resets job state; duplicated actors/PIE copies reset backend and job metadata. Auto mode recovers after temporarily missing references and avoids repeated submissions for unchanged invalid values, including NaNs. It responds to light phase/direction/source changes, ignores valid light position/amplitude/polarization changes, and rejects invalid fields again before publication. Preview conversion/upload remains game-thread work and may still affect large-grid frame time.
+
+The workbench optionally links a solver, forwards Solve/Cancel and mirrors status; it does not own jobs. Existing levels use the native solver class with an assigned Workbench. The setup script now supports `BP_CGHSolver` and newly created map references, while preserving existing assets/maps. It has not been run, and no Blueprint or map was saved for this milestone. Docker/TCP remains explicitly unimplemented.
+
+Validation: Editor/Game builds and **42 headless CGH tests passed**, exit code 0 with zero test failures/warnings/not-run. The no-save 4096×4096 oblique-plane-wave solve measured 0.111 ms submission, 0.548120 s worker time and 22.267 ms maximum polling/publication call; cancellation returned in 0.053 ms. Existing `BP_CGHSLM` activation at 32×16 passed. All 11 saved assets/maps were preserved. Report: `Saved/Automation/CGHPointFocus/index.json`; details in the [solver verification record](CGH_PointFocus_Solver.md#verification-record). These headless measurements exclude grayscale/render upload and full GUI responsiveness; interactive Simulation, reconstruction, and packaging remain separate acceptance work.
 
 For each follow-up milestone, append its date, implementation, validation evidence, remaining issues, and next task. Keep proposed work in the plan until it has execution evidence.

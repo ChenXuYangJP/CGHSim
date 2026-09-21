@@ -73,6 +73,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "CGH|Phase")
 	bool SetPhasePattern(const FCGHSLMPhasePattern& Pattern);
 
+	/** C++ ownership-transfer publication for solver output; same validation/revision contract. */
+	bool SetPhasePattern(FCGHSLMPhasePattern&& Pattern);
+
 	/** Load the saved phase grid, using nearest-neighbor sampling to match the current SLM resolution. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Phase")
 	void LoadStoredPhasePattern();
@@ -138,4 +141,5 @@ private:
 	FCGHSLMPhasePattern PhasePattern;
 
 	void UpdateVisualizationComponents();
+	bool PublishPhasePattern(const FCGHSLMPhasePattern& Pattern, FCGHSLMPhasePattern* OwnedPattern);
 };

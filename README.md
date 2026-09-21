@@ -4,7 +4,7 @@
 
 CGHSim provides an editable scene for arranging a target, spatial light modulator (SLM), camera, and reconstruction light. Native C++ actors define optical parameters and validation; Blueprint children provide scene presentation.
 
-**Current milestone:** automatic SI scene descriptions, versioned mesh/point-cloud targets, and an SLM phase-pattern editor preview. Hologram generation, wave propagation, and optical reconstruction are not yet implemented. The camera currently shows a standard Unreal geometry preview.
+**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for one point target, compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
 
 ## What works today
 
@@ -13,10 +13,11 @@ CGHSim provides an editable scene for arranging a target, spatial light modulato
 | **Target** | Point or static-mesh targets, configurable contour slicing and point spacing, versioned geometry/point-cloud resources, and a cached debug point-cloud view. |
 | **SLM** | Editable resolution/pitch and physical active area, validated transient phase storage, and an exact-resolution grayscale preview on selection. Includes explicit test-ramp and clear controls. |
 | **Camera** | Double-precision optical parameters synchronized to a Cine Camera preview, including focal length, aperture, sensor dimensions, and focus distance. |
-| **Reconstruction light** | Source type, wavelength, amplitude, phase, polarization, and propagation direction. |
-| **Workbench** | Explicit actor references, an automatically updated SI scene description, configuration validation, and visualization refresh controls. |
+| **Reconstruction light** | Editable source/optical parameters. PointFocus uses PlaneWave wavelength, initial phase, and direction, with phase referenced to the SLM origin; amplitude/polarization are validated but unused by the scalar phase model. |
+| **Workbench** | Explicit actor references, an automatically updated SI scene description, configuration validation, and optional solver command/status controls. |
+| **Solver** | CPU PointFocus for exactly one point target, asynchronous jobs, cancellation, rejection of obsolete results, Generate button, and optional automatic updates. A replaceable backend interface reserves Docker/TCP integration for later. |
 
-The starter level includes all five Blueprint actors with connected references, plus separate presentation geometry and lighting. Python scripts create missing assets and verify the scaffold.
+The checked-in starter level includes the five scene Blueprint actors with connected references, plus separate presentation geometry and lighting. Add the native **CGH Solver Actor** to an existing level and assign its **Workbench**. The asset generator also supports `BP_CGHSolver` and connects it when creating a new map; it preserves existing maps.
 
 ## Requirements
 
@@ -66,7 +67,8 @@ In the editor:
 2. Edit each actor's optical parameters in the **CGH** sections of the Details panel.
 3. Select **CGH Workbench** to inspect the automatically updated **Scene Description**, or click **Validate Scene** or **Refresh Visualization**.
 4. Select the SLM for its phase inset; click **CGH > Phase > Load Stored Phase Pattern** to activate the bundled saved sample, or **Clear Phase Pattern** to remove it. **Generate Preview Phase Ramp** provides another display check. These samples do not run a solver.
-5. Save the level to preserve parameter and placement changes. Phase data is transient and must be supplied again after reopening.
+5. For a computed point-focus pattern, add **CGH Solver Actor**, set its **Workbench**, and use exactly one **Point** target off the SLM plane with a **PlaneWave** reconstruction light. Click **Generate Phase Pattern** with **CPU / PointFocus** selected; enable **Auto Solve** only if wanted. The [solver guide](Docs/CGH_PointFocus_Solver.md) covers workbench buttons, assumptions, and status.
+6. Save the level to preserve parameter and placement changes. Phase data is transient and must be supplied or generated again after reopening.
 
 The SLM is shown at its physical dimensions: the native default `4096 × 4096` pixels at `8 µm` pitch produce an active area of **32.768 × 32.768 mm**. Frame the SLM separately for a close view. Its phase inset scales to a readable size independently of physical pitch; **Camera Preview Size** controls the inset size. For point targets, the sphere is a selection marker rather than the mathematical point's physical extent. Mesh targets use their assigned static mesh and support **Show Point Cloud**.
 
@@ -80,13 +82,14 @@ CGHSim/
 ├── Source/CGHSim/
 │   ├── CGHSim.Build.cs
 │   └── CGH/
-│       ├── Actors/                  # Target, SLM, camera, light, workbench
+│       ├── Actors/                  # Target, SLM, camera, light, workbench, solver
 │       ├── Components/              # Point-cloud rendering and SLM phase preview
-│       ├── Types/                   # Optical descriptions, resources, phase pattern
+│       ├── Solver/                  # Backend interface and CPU PointFocus
+│       ├── Types/                   # Optical descriptions, resources, phase pattern, jobs
 │       ├── Utils/                   # Unit conversion, mesh sampling, phase grayscale
 │       └── Tests/                   # Headless and Slate-render automation
 ├── Content/CGHSim/
-│   ├── Blueprints/                 # Five Blueprint children
+│   ├── Blueprints/                 # Scene Blueprint children; optional generated solver
 │   ├── Materials/                  # Reserved for custom materials
 │   ├── Meshes/                     # Reserved for custom meshes
 │   └── Maps/L_CGHWorkbench.umap
@@ -108,7 +111,7 @@ CGHSim/
 
 `FCGHSceneDescription` has `SchemaVersion = 2` and separate read-only SLM, reconstruction-light, target, and camera descriptions. All lengths and positions use meters; phases and polarization use radians. Positions and unit directions use the SLM-local frame, and the camera pose comes from its `OpticalReference` component. Editable actor parameters keep their existing mm, µm, nm, and degree units.
 
-The workbench's transient **Scene Description** updates after editor property changes, undo/redo, transforms, reference changes, and actor deletion. Runtime polling runs in the post-update tick; call **Update Scene Description** when code needs the snapshot immediately after a same-frame parameter write. **Scene Description Complete** means all required actor references are present; use **Validate Scene** separately to check physical validity. Target resources/debug display update automatically. SLM phase publication and resolution changes update its preview; other runtime presentation edits can use **Refresh Visualization**. No update runs an optical solver.
+The workbench's transient **Scene Description** updates after editor property changes, undo/redo, transforms, reference changes, and actor deletion. Runtime polling runs in the post-update tick; call **Update Scene Description** when code needs the snapshot immediately after a same-frame parameter write. **Scene Description Complete** means all required actor references are present; use **Validate Scene** separately to check physical validity. Target resources/debug display update automatically. SLM phase publication and resolution changes update its preview; other runtime presentation edits can use **Refresh Visualization**. Scene-description updates alone do not run the solver. Generate explicitly, or enable **Auto Solve** on a linked solver actor; the default is manual.
 
 ## Asset generation and checks
 
@@ -124,7 +127,7 @@ The Blueprint assets and starter map are included in the project. To create miss
   -unattended -nullrhi -nosplash
 ```
 
-The generator preserves existing Blueprints and maps, verifies compatible native classes, and reloads a newly saved map to check its actor references. It does not reset an existing workbench.
+The generator preserves existing Blueprints and maps, verifies compatible native classes, and reloads a newly saved map to check its actor references. It does not reset an existing workbench or add the new solver actor to an existing map. No asset generation was run for the CPU-solver milestone.
 
 Run the integration checks:
 
@@ -151,6 +154,8 @@ Run the headless CGH automation tests after building the Editor target:
 
 ### Recorded verification
 
+**2026-09-21 — CPU PointFocus solver:** Editor/Game builds and all **42 headless CGH tests passed**, including plane-wave phase compensation and asynchronous job lifecycle checks. A no-save 4096×4096 solve, cancellation, and existing SLM Blueprint activation also passed; all 11 existing assets/maps were preserved. See the [solver verification record](Docs/CGH_PointFocus_Solver.md#verification-record) for coverage and timings.
+
 **2026-09-21 — mesh targets and SLM phase preview:**
 
 - Editor and Game Linux Development builds passed.
@@ -173,13 +178,14 @@ Full workbench graphical acceptance, interactive Simulation and undo/redo, cooki
 
 1. Complete visual acceptance of the workbench and verify interactive Simulation.
 2. Establish a Linux cook/package checkpoint.
-3. Choose a first optical calculation and implement a verified numerical reference case.
-4. Feed computed phases into the existing SLM preview, then add reconstruction-result visualization, solver job states, and an external solver interface.
+3. Extend the CPU PointFocus reference with a numerically checked reconstruction view.
+4. Implement the Docker/TCP backend behind the existing solver interface, preserving the explicit propagation convention and job lifecycle.
 
 GS/FFT propagation, camera sensor simulation, GPU solver integration, and runtime parameter controls remain future scope. See the handoff for proposed ordering and acceptance criteria.
 
 ## Documentation
 
+- [CPU PointFocus solver](Docs/CGH_PointFocus_Solver.md) — propagation sign, numerical assumptions, asynchronous jobs, controls, and backend contract.
 - [SLM pixel coordinates and code audit](Docs/SLM_Pixel_Coordinates.md) — indexing, physical positions, grid-axis names, and canonical front-view versus Unreal camera orientation.
 - [Actor scaffold and usage](Docs/CGH_Actor_Scaffold.md) — class responsibilities, units, editor workflow, and scripts.
 - [Development handoff and plan](Docs/CGHSim_Development_Handoff.md) — completed work, validation evidence, and next steps.

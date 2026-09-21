@@ -97,6 +97,16 @@ void ACGHSLMActor::SynchronizePhasePattern()
 
 bool ACGHSLMActor::SetPhasePattern(const FCGHSLMPhasePattern& Pattern)
 {
+	return PublishPhasePattern(Pattern, nullptr);
+}
+
+bool ACGHSLMActor::SetPhasePattern(FCGHSLMPhasePattern&& Pattern)
+{
+	return PublishPhasePattern(Pattern, &Pattern);
+}
+
+bool ACGHSLMActor::PublishPhasePattern(const FCGHSLMPhasePattern& Pattern, FCGHSLMPhasePattern* OwnedPattern)
+{
 	SynchronizePhasePattern();
 	if (!CGHPhasePreview::ValidatePattern(Pattern, Parameters.ResolutionX, Parameters.ResolutionY, PhasePatternError))
 	{
@@ -105,7 +115,14 @@ bool ACGHSLMActor::SetPhasePattern(const FCGHSLMPhasePattern& Pattern)
 	if (!HasValidPhasePattern() || PhasePattern.PhaseRad != Pattern.PhaseRad)
 	{
 		const uint64 NextRevision = PhasePattern.Revision + 1;
-		PhasePattern = Pattern;
+		if (OwnedPattern)
+		{
+			PhasePattern = MoveTemp(*OwnedPattern);
+		}
+		else
+		{
+			PhasePattern = Pattern;
+		}
 		PhasePattern.Revision = NextRevision;
 	}
 	bHasPhaseData = true;

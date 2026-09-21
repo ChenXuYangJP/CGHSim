@@ -1,6 +1,6 @@
 # CGH actor scaffold
 
-This implements the editable scene structure from the [shared design](https://chatgpt.com/share/6aad4cb3-0f30-83e8-9ea8-b099461b757d). Point and static-mesh targets are supported, including CPU surface-contour sampling. Optical generation, propagation, sensor simulation and external solver communication remain unimplemented.
+This implements the editable scene structure from the [shared design](https://chatgpt.com/share/6aad4cb3-0f30-83e8-9ea8-b099461b757d). Point and static-mesh targets are supported, including CPU surface-contour sampling. The [CPU PointFocus solver](CGH_PointFocus_Solver.md) generates an SLM phase pattern for exactly one Point target. Reconstruction images, sensor simulation and external solver communication remain unimplemented.
 
 ## Files and responsibilities
 
@@ -10,11 +10,12 @@ This implements the editable scene structure from the [shared design](https://ch
 | `ACGHSLMActor` | `BP_CGHSLM` | Pixel resolution/pitch, derived active area, versioned phase storage, and selected-actor phase preview |
 | `ACGHCameraActor` | `BP_CGHCamera` | Double-precision optical parameters driving a Cine Camera geometry preview |
 | `ACGHReconstructionLightActor` | `BP_CGHReconstructionLight` | Wavelength, amplitude, phase, polarization and propagation direction |
-| `ACGHWorkbenchActor` | `BP_CGHWorkbench` | Explicit actor references, automatic SI snapshot updates, validation and refresh buttons |
+| `ACGHWorkbenchActor` | `BP_CGHWorkbench` | Explicit actor references, automatic SI snapshots, validation, refresh, and optional solver buttons/status |
+| `ACGHSolverActor` | Optional generated `BP_CGHSolver` | Asynchronous CPU PointFocus jobs, input/output buffers, cancellation, opt-in auto updates, and validated SLM publication |
 
 Sources are under `Source/CGHSim/CGH/Actors`. Shared enums, editable parameter structs, and read-only description structs are in `Types/CGHTypes.h`; conversions are in `Utils/CGHUnitConversion.h`. `FCGHSceneDescription` exports optical poses and parameters in SI units with `SchemaVersion = 2`.
 
-The Blueprints and `Maps/L_CGHWorkbench.umap` live under `Content/CGHSim`. `Materials` and `Meshes` are reserved directories; this first scaffold uses built-in Engine meshes. Blueprint graphs contain no optical algorithm. Native default mesh components can be styled in Blueprint children.
+The scene Blueprints and `Maps/L_CGHWorkbench.umap` live under `Content/CGHSim`. The solver can be placed directly as a native C++ Actor; the asset generator creates a missing `BP_CGHSolver` and connects it only in newly created maps. `Materials` and `Meshes` are reserved directories; this first scaffold uses built-in Engine meshes. Blueprint graphs contain no optical algorithm. Native default mesh components can be styled in Blueprint children.
 
 ## Editing the scene
 
@@ -36,7 +37,7 @@ The starter map places the SLM at `(0,0,0)` cm, the target at `(50,0,0)` cm, the
 - Target `MarkerRadiusCm` affects only the visual sphere, never the mathematical point. Point targets ignore mesh and sampling settings and keep both geometry resources empty.
 - Light +X is its propagation direction. The reconstruction-light actor contains no UE illumination component.
 - Camera optical parameters flow one way into `PreviewCamera`. `OpticalReference` supplies the exported optical position and forward direction, including component offsets. Output resolution is independent of both filmback aspect and SLM resolution, and is currently stored only.
-- An SLM starts with `GenerationState = NotImplemented` and `HasPhaseData = false`. Publishing valid phase data changes the state to `Ready`; this indicates stored data, while optical generation remains unimplemented. Clearing the data restores the initial state.
+- An SLM starts with `GenerationState = NotImplemented` and `HasPhaseData = false`. Publishing valid phase data changes the state to `Ready`; this indicates stored data. The legacy empty-state enum name does not describe whether a solver implementation exists; solver job state is separate. Clearing the data restores the initial state.
 
 ## Scene description and updates
 
@@ -86,13 +87,23 @@ A saved sample is included at **`/Game/CGHSim/PhasePatterns/DA_SLMPreviewPattern
 
 For a separate generated display check, click **Generate Preview Phase Ramp** under **CGH > Phase**. It creates a horizontal ramp with sample `2*pi*column/ResolutionX`, increasing along local +Y and repeated on every row, and labels the result **Preview test ramp**. This button does not run a CGH solver. **Clear Phase Pattern** removes the samples and returns the panel to its empty state.
 
-To publish solver or imported data, construct `FCGHSLMPhasePattern` from `CGH/Types/CGHSLMPhasePattern.h` and call `SetPhasePattern` in C++ or Blueprint. Set `ResolutionX`, `ResolutionY`, and exactly `ResolutionX * ResolutionY` finite `double` phase values in radians. Storage is row-major: `PhaseRad[row * ResolutionX + column]`, with row zero at the top (maximum local Z) and column zero at the left (minimum local Y) of the canonical image. Dimensions must match the SLM parameters. Input is limited to 16,384 pixels per axis and 67,108,864 total pixels; the graphics device may impose a smaller preview-texture limit. Invalid input returns false, sets `PhasePatternError`, and preserves the previous valid pattern. The actor owns a copy of accepted data; the incoming revision is ignored.
+To publish solver or imported data, construct `FCGHSLMPhasePattern` from `CGH/Types/CGHSLMPhasePattern.h` and call `SetPhasePattern` in C++ or Blueprint. Set `ResolutionX`, `ResolutionY`, and exactly `ResolutionX * ResolutionY` finite `double` phase values in radians. Storage is row-major: `PhaseRad[row * ResolutionX + column]`, with row zero at the top (maximum local Z) and column zero at the left (minimum local Y) of the canonical image. Dimensions must match the SLM parameters. Input is limited to 16,384 pixels per axis and 67,108,864 total pixels; the graphics device may impose a smaller preview-texture limit. Invalid input returns false, sets `PhasePatternError`, and preserves the previous valid pattern. The actor owns accepted data; the ordinary C++/Blueprint setter copies it, while the C++ rvalue overload moves a completed solver buffer after validation. The incoming revision is ignored.
 
 C++ consumers can read `GetPhasePattern()` without copying the array and compare `GetPhasePatternRevision()` to their cached revision. Blueprint readers use **Get Phase Pattern Copy**, which returns an independent value; editing that copy cannot change the published buffer or bypass `SetPhasePattern` validation and revision updates. Revisions advance when phase samples change, when existing data is cleared, or when resolution changes. Publishing identical samples and repeatedly selecting the actor retain the revision. Publishing external data clears the demo label even when its samples match the preview ramp. Phase storage is transient and is not saved with the map.
 
 Changing pixel pitch preserves phase samples, because it changes physical size rather than the pixel grid. Changing either resolution clears mismatched samples; editor/runtime ticks catch direct parameter writes, and C++ code can call `SynchronizePhasePattern()` before consuming data in the same frame. **Refresh Visualization** preserves a valid pattern. `HasValidPhasePattern()` confirms that the current samples still match the current grid.
 
-The preview texture has exactly one texel per SLM pixel and uses nearest-neighbor display scaling, preserving the pixel-grid aspect ratio independently of physical pitch. Phase wraps into `[0, 2*pi)` and maps linearly to grayscale: zero and whole cycles are black, pi is mid-gray, and values approaching 2*pi are white. Negative phases wrap the same way. Texture bytes use linear BGRA8 with gamma conversion disabled. The texture is updated only after its phase revision or grid changes; unchanged selection reuses it. The full phase array stays out of the Details tree and undo transactions, avoiding per-pixel property rows. The preview component and its texture are editor-only; runtime phase storage is available to future solvers and output devices.
+The preview texture has exactly one texel per SLM pixel and uses nearest-neighbor display scaling, preserving the pixel-grid aspect ratio independently of physical pitch. Phase wraps into `[0, 2*pi)` and maps linearly to grayscale: zero and whole cycles are black, pi is mid-gray, and values approaching 2*pi are white. Negative phases wrap the same way. Texture bytes use linear BGRA8 with gamma conversion disabled. The texture is updated only after its phase revision or grid changes; unchanged selection reuses it. The full phase array stays out of the Details tree and undo transactions, avoiding per-pixel property rows. The preview component and its texture are editor-only; runtime phase storage is available to the CPU solver and future output devices.
+
+## CPU PointFocus controls
+
+Place a native **CGH Solver Actor** in the existing level and set its **Workbench**. With exactly one Point target off the SLM plane, a phase-only SLM, and a valid PlaneWave reconstruction light, choose **CPU / PointFocus** and click **Generate Phase Pattern**. **Auto Solve** is disabled by default; enabling it recomputes after changes to consumed optical inputs. **Cancel Solve** retains the last published pattern. Select the SLM to inspect the output after the solver reaches `Ready`.
+
+Optionally assign the workbench's **Solver** reference for its **Solve Phase Pattern**, **Cancel Solve**, and mirrored status. Its Solve button binds an unassigned solver to that workbench. Jobs and buffers remain owned by the solver actor. Camera is optional for PointFocus; general scene validation still checks the full scene.
+
+The numerical core runs on a worker using an immutable SI snapshot, with `U(r) proportional to exp(+i k r)` and `phase_slm = wrap(target_phase - k*r - phase_incident)`. PlaneWave illumination uses `phase_incident(p) = InitialPhaseRad + k*dot(DirectionSLM, p)`, with a finite unit direction and phase referenced to the SLM origin; light position is ignored. Light amplitude must be finite/nonnegative and polarization angle finite, but neither alters the scalar phase-only result. PointSource is unsupported. Normal incidence along ±X with zero initial phase reduces to the original `target_phase - k*r` formula.
+
+Auto Solve responds to wavelength/phase/direction/source changes; valid position/amplitude/polarization changes do not trigger a new pattern, while invalid light fields fail validation, including before publication. It rejects mesh/multiple targets and obsolete results; Docker is selectable only as an explicit unimplemented backend. Publication, validation, grayscale conversion and texture upload occur on the game thread, so large previews can still take frame time. Read the [solver contract and usage](CGH_PointFocus_Solver.md) for limitations and lifecycle details.
 
 ## Recreate assets and verify
 
@@ -114,7 +125,7 @@ Create missing assets:
   "-script=$PWD/Scripts/create_cgh_assets.py" -unattended -nullrhi -nosplash
 ```
 
-The generator preserves existing Blueprints/maps and rejects conflicting Blueprint parents. It saves a new map only after populating and validating it, then reloads it to check references. It never updates an existing map, so subsequent scene edits remain yours. In an interactive editor it refuses to replace an unsaved world. Assets can also be created through **Tools > Execute Python Script** after building the native classes.
+The generator preserves existing Blueprints/maps and rejects conflicting Blueprint parents. It saves a new map only after populating and validating it, then reloads it to check references. It never updates an existing map, so subsequent scene edits remain yours. Newly created maps include `BP_CGHSolver` with both workbench/solver references; existing levels need a solver placed explicitly. The updated generator has not been run for this milestone. In an interactive editor it refuses to replace an unsaved world. Assets can also be created through **Tools > Execute Python Script** after building the native classes.
 
 Run the integration checks:
 
@@ -147,6 +158,8 @@ It renders the actual phase widget in an isolated Slate window, checks displayed
 
 ## Verified in this workspace
 
+The CPU PointFocus milestone passed Editor/Game builds and all **42 headless CGH tests** on **2026-09-21** (exit code 0, zero test failures/warnings/not-run). Coverage includes incident plane-wave compensation, automatic updates, publication, cancellation, stale inputs, duplication and teardown. The no-save 4096×4096 oblique-illumination solve, cancellation, and existing Blueprint 32×16 activation also passed; all 11 existing assets/maps were unchanged. See the [verification record](CGH_PointFocus_Solver.md#verification-record) for timings and limitations. The following entries describe earlier milestones.
+
 The stored-sample follow-up on **2026-09-21** passed both Editor and Game builds and all **26 headless CGH tests** (exit code 0). Added tests cover saved payload ownership/serialization, nearest-neighbor resizing, activation/reload, invalid-load preservation, and unchanged SLM physical settings. The new `DA_SLMPreviewPattern` asset was saved, reloaded in a fresh Unreal process, and activated through the existing `BP_CGHSLM` at 32-by-16 and through the native actor at its default 4096-by-4096 resolution. Repeat setup preserved the asset bytes. Hashes confirmed all 10 pre-existing assets/maps were unchanged. Reports are in `Saved/Automation/CGHStoredPhasePattern`; build/setup/smoke logs are `Saved/Logs/CGHStoredPhase*2026-09-21.log`. The earlier real-RHI render check below remains the evidence for the unchanged grayscale drawing path.
 
 On **2026-09-21**, the SLM phase preview passed both Editor and Game Development builds, all **21 headless `CGH` automation tests**, and the separate **Vulkan/Slate render test**, each with exit code 0. The rendered 4-by-2 grid retained gray levels 0, 64, 128, and 255 in the correct row order. A no-save smoke check also verified that the existing `BP_CGHSLM` inherits the active preview component and supports phase publication, readback, demo generation, and clearing. Reports are in `Saved/Automation/CGHSLMPreview` and `Saved/Automation/CGHSLMPreviewRender`; the rendered screenshot is alongside the headless report. No project assets or maps were saved. Restart the editor after rebuilding to load the new native preview component.
@@ -159,4 +172,4 @@ On **2026-09-20**, the SI scene-description implementation passed `CGHSimEditor 
 
 The Python integration script passed with `CGH_SCAFFOLD_SMOKE_OK` and exit code 0, including automatic snapshot initialization on map load. Its expectations were aligned with the existing 4096-pixel SLM and 500 mm focus defaults; saved target position checks use the actual optical pose. No assets or maps were saved during these checks.
 
-Asset creation, map reload, and byte-for-byte preservation on repeated setup were verified on **2026-09-19**. Local execution logs are listed in the [development handoff](CGHSim_Development_Handoff.md#3-verification-completed). Graphical acceptance, interactive Simulation and undo/redo, cook/packaging, and optical calculations remain unverified or unimplemented; transaction callbacks are covered by automation.
+Asset creation, map reload, and byte-for-byte preservation on repeated setup were verified on **2026-09-19**. Local execution logs are listed in the [development handoff](CGHSim_Development_Handoff.md#3-verification-completed). Full graphical acceptance, interactive Simulation and undo/redo, cook/packaging, and optical reconstruction remain unverified or unimplemented; transaction callbacks are covered by automation.

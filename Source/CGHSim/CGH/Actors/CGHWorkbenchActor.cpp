@@ -3,6 +3,7 @@
 #include "CGH/Actors/CGHCameraActor.h"
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Actors/CGHSLMActor.h"
+#include "CGH/Actors/CGHSolverActor.h"
 #include "CGH/Actors/CGHTargetActor.h"
 #include "CGH/Utils/CGHUnitConversion.h"
 #include "Components/SceneComponent.h"
@@ -33,8 +34,7 @@ void ACGHWorkbenchActor::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	UpdateSceneDescription();
-	Label->SetText(FText::FromString(
-		TEXT("CGH Workbench\nRun Validate Scene\nOptical solver: not implemented")));
+	UpdateStatusLabel();
 }
 
 void ACGHWorkbenchActor::PostRegisterAllComponents()
@@ -91,6 +91,7 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 		return;
 	}
 	TGuardValue<bool> UpdatingGuard(bUpdatingSceneDescription, true);
+	UpdateSolverStatus();
 	RefreshSceneObservers();
 
 	// Rebuild from scratch so deleted/unassigned references never retain stale data.
@@ -448,6 +449,56 @@ void ACGHWorkbenchActor::UpdateStatusLabel()
 		? TEXT("Configuration valid")
 		: FString::Printf(TEXT("Configuration invalid (%d issue(s))"), ValidationMessages.Num());
 	Label->SetText(FText::FromString(FString::Printf(
-		TEXT("CGH Workbench\n%s\nOptical solver: not implemented"), *Status)));
+		TEXT("CGH Workbench\n%s\nSolver: %s"), *Status, *SolverStatusMessage)));
 	Label->SetTextRenderColor(bSceneValid ? FColor(100, 230, 130) : FColor(255, 170, 70));
+}
+
+void ACGHWorkbenchActor::UpdateSolverStatus()
+{
+	const ECGHSolverJobState PreviousState = SolverJobState;
+	const FString PreviousMessage = SolverStatusMessage;
+	if (!IsSceneActorAvailable(Solver))
+	{
+		SolverJobState = ECGHSolverJobState::Idle;
+		SolverStatusMessage = TEXT("No solver assigned in this world.");
+	}
+	else if (Solver->Workbench != this)
+	{
+		SolverJobState = ECGHSolverJobState::Idle;
+		SolverStatusMessage = TEXT("Assign this workbench on the solver, or press Solve Phase Pattern to bind an unassigned solver.");
+	}
+	else
+	{
+		SolverJobState = Solver->JobState;
+		SolverStatusMessage = Solver->StatusMessage;
+	}
+	if (PreviousState != SolverJobState || PreviousMessage != SolverStatusMessage)
+	{
+		UpdateStatusLabel();
+	}
+}
+
+void ACGHWorkbenchActor::SolvePhasePattern()
+{
+	if (IsSceneActorAvailable(Solver))
+	{
+		if (!IsValid(Solver->Workbench))
+		{
+			Solver->Workbench = this;
+		}
+		if (Solver->Workbench == this)
+		{
+			Solver->StartSolve();
+		}
+	}
+	UpdateSolverStatus();
+}
+
+void ACGHWorkbenchActor::CancelSolve()
+{
+	if (IsSceneActorAvailable(Solver) && Solver->Workbench == this)
+	{
+		Solver->CancelSolve();
+	}
+	UpdateSolverStatus();
 }

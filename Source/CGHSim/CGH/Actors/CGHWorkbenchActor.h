@@ -2,12 +2,14 @@
 
 #include "CoreMinimal.h"
 #include "CGH/Types/CGHTypes.h"
+#include "CGH/Types/CGHSolverTypes.h"
 #include "GameFramework/Actor.h"
 #include "CGHWorkbenchActor.generated.h"
 
 class ACGHCameraActor;
 class ACGHReconstructionLightActor;
 class ACGHSLMActor;
+class ACGHSolverActor;
 class ACGHTargetActor;
 class USceneComponent;
 class UTextRenderComponent;
@@ -38,6 +40,24 @@ public:
 
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
 	TArray<TObjectPtr<ACGHTargetActor>> Targets;
+
+	/** Optional job coordinator. Existing workbenches remain usable without a solver. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Solver")
+	TObjectPtr<ACGHSolverActor> Solver;
+
+	/** Mirrors the linked solver; the solver actor owns state transitions and buffers. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Solver")
+	ECGHSolverJobState SolverJobState = ECGHSolverJobState::Idle;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Solver")
+	FString SolverStatusMessage = TEXT("No solver assigned.");
+
+	/** Bind an unassigned solver to this workbench and request a fresh point-focus pattern. */
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
+	void SolvePhasePattern();
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
+	void CancelSolve();
 
 	/** Derived SI data in the SLM's unscaled local coordinate system. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Scene")
@@ -78,6 +98,7 @@ protected:
 	TObjectPtr<UTextRenderComponent> Label;
 
 	void UpdateStatusLabel();
+	void UpdateSolverStatus();
 
 private:
 	bool IsSceneActorAvailable(const AActor* Actor) const;
