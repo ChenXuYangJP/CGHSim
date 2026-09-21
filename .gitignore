@@ -5,6 +5,9 @@
 /Saved/
 /DerivedDataCache/
 
+# Generated SLM phase-pattern assets (raw exports are covered by /Saved/)
+/Content/CGHSim/PhasePatterns/Generated/
+
 # Generated files for source-based project plugins
 /Plugins/**/Binaries/
 /Plugins/**/Intermediate/

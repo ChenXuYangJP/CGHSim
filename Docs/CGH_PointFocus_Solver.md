@@ -76,6 +76,7 @@ The solver defaults to **CPU**, **PointFocus**, and **Auto Solve disabled** (`bA
 | Control or state | Behavior |
 | --- | --- |
 | **Generate Phase Pattern** / `StartSolve()` | Captures current input and submits or replaces the latest request without waiting for computation. |
+| **Save Phase Pattern** / `SaveGeneratedPhasePattern()` | Explicit editor save of the last published result, only while `Ready` and the destination SLM still holds that result. Writes an Unreal asset, raw numerical files, and an exact-resolution grayscale PNG using the SLM's configured folders; reports save status separately from job state. |
 | **Cancel Solve** | Drops queued work, requests cancellation, suppresses publication, and returns to `Idle`; preserves the last published SLM pattern. |
 | **Auto Solve** | Opt-in mode: submits initially and when consumed optical inputs or references change. Cancelling does not immediately retry unchanged input. Restoring a temporarily missing reference allows automatic recovery; unchanged invalid numerical inputs, including NaNs, do not submit repeated jobs. Light initial phase, direction, and source-type changes participate. Valid light position/amplitude/polarization changes, camera/presentation/target-amplitude changes, and manual phase clear alone do not trigger recomputation; invalid fields still fail validation. |
 | `Idle` | No requested result awaiting publication; also used after cancellation. |
@@ -95,13 +96,79 @@ The workbench's optional `Solver` reference enables **Solve Phase Pattern**, **C
 2. Add the native **CGH Solver Actor** (`ACGHSolverActor`) using Place Actors / the C++ class browser. Set its **Workbench** reference to the existing workbench.
 3. On the workbench, assign the SLM, a reconstruction light with **Source Type = PlaneWave**, and exactly one target with **Target Type = Point**. Put the target off the SLM plane. Set light wavelength, initial phase, and actor orientation to define the incident wave; its phase reference stays at the SLM origin. Optionally set the workbench's **Solver** reference for its buttons and status display.
 4. Keep the solver at **CPU / PointFocus** and click **Generate Phase Pattern**, or use **Solve Phase Pattern** on the linked workbench. Select the SLM to inspect the generated grayscale pattern after `Ready`.
-5. Enable **Auto Solve** if target position/phase, SLM grid/pitch, or light wavelength/initial-phase/direction/source-type edits should request another pattern. Phase data remains transient and must be generated again after reopening the level.
+5. Enable **Auto Solve** if target position/phase, SLM grid/pitch, or light wavelength/initial-phase/direction/source-type edits should request another pattern.
+6. To keep a result, wait for `Ready`, configure the save folders on the SLM if needed, then click **Save Phase Pattern** on the solver. After reopening the level, choose the saved asset in the SLM's **Stored Phase Pattern** and click **Load Stored Phase Pattern**. Generation and automatic updates never save files themselves.
 
 No existing Blueprint or map needs to be regenerated. `Scripts/create_cgh_assets.py` can create a missing `BP_CGHSolver` and includes both solver/workbench references when creating a new starter map. It preserves existing assets/maps and does not insert a solver into an existing level. The script has not been executed for this milestone; no solver asset or map has been saved as part of this change.
 
+## Saving and reloading phase patterns
+
+Saving is an explicit editor action. **Save Phase Pattern** on the solver calls `SaveGeneratedPhasePattern()` and saves all four files from the last successfully published result. It requires `Ready`, the same destination SLM, and its recorded phase revision. Queued/running work, a replaced SLM, a cleared pattern, or a later phase publication that changes its revision prevents the solver from saving an unrelated buffer. The SLM's own **Save Phase Pattern** button calls `SaveCurrentPhasePattern()` and can save any valid current pattern, including a loaded pattern or a manually generated preview ramp.
+
+Choose destinations on the **SLM** before saving:
+
+| SLM setting | Default and meaning |
+| --- | --- |
+| **Phase Asset Save Folder** / `PhaseAssetSaveFolder` | `/Game/CGHSim/PhasePatterns/Generated`, an Unreal Content folder. Saves a reusable `UCGHPhasePatternAsset` `.uasset`. |
+| **Phase Raw Save Directory** / `PhaseRawSaveDirectory` | `Saved/CGHSim/PhasePatterns`, relative to the project directory. Also accepts an absolute filesystem folder selected with the folder picker. Saves matching `.bin`, `.json`, and `.png` files. |
+
+Each click creates a unique timestamp-and-GUID name shared by all four files. Existing files/assets are not overwritten. The operation attempts to remove files created by that save if an ordinary failure prevents any output from completing; this is best-effort cleanup, not a crash-safe filesystem transaction. Check **Phase Save Status** (`PhaseSaveStatus`) on the actor for the outcome. The SLM's `LastSavedPhaseAsset`, `LastSavedPhaseBinaryFile`, `LastSavedPhaseMetadataFile`, and `LastSavedPhaseImageFile` report successful output locations. Saving does not publish a new phase buffer, advance its revision, change **Stored Phase Pattern**, or alter the solver's job state.
+
+The raw binary is the exact stored phase array: **headerless little-endian IEEE-754 float64 radians**, with no grayscale conversion or phase quantization. It contains `ResolutionX * ResolutionY` samples in `PhaseRad[row * ResolutionX + column]` order and has a byte count of `8 * ResolutionX * ResolutionY`. Columns increase toward SLM-local +Y; rows increase toward -Z. The UTF-8 JSON sidecar records the dimensions, pixel pitches in meters, layout/axis convention, source label, and preview flag. This is phase-buffer metadata; it does not claim to archive the originating target, wavelength, or complete solver input. In particular, a preview ramp remains identified as preview data.
+
+The PNG is a lossless **single-channel 8-bit grayscale** image with exactly `ResolutionX` columns and `ResolutionY` rows. Each SLM sample maps directly to one image pixel; row zero is the top row, with no flips, resampling, borders, or gamma transformation. Its stored byte value matches the preview's `PhaseToGray` mapping:
+
+```text
+gray = round(255 * wrap_[0, 2*pi)(phase_rad) / (2*pi))
+```
+
+PNG preserves those byte values losslessly, but phase-to-grayscale conversion is quantized to 256 levels. The `.bin` and Unreal asset retain full-precision phase data. The exported image can therefore be pixel-accurate without preserving every phase value numerically.
+
+The JSON schema retains `format_version = 1` with additive image fields. Its keys are `asset_path`, `binary_filename`, `resolution_x`, `resolution_y`, `phase_unit`, `dtype`, `endianness`, `array_order`, `index`, `pixel_pitch_x_m`, `pixel_pitch_y_m`, `coordinate_frame`, `pixel_center_convention`, `optical_normal_slm`, `pixel_plane_x_m`, `column_direction_slm`, `row_direction_slm`, `pattern_label`, `is_preview_pattern`, `image_filename`, `image_format`, `image_bit_depth`, `image_mapping`, and `image_row_order`. Both `binary_filename` and `image_filename` are relative to the sidecar's directory. Image metadata declares `image_format = "PNG"`, `image_bit_depth = 8`, `image_mapping = "round(255 * wrap_0_2pi(phase_rad) / (2*pi))"`, and `image_row_order = "top-to-bottom"`. Pixel pitches describe the SLM settings at save time; the asset itself preserves the phase grid and its label/preview flag.
+
+The sidecar declares `coordinate_frame = "SLM-local"`, `pixel_center_convention = "centered"`, `optical_normal_slm = "+X"`, and `pixel_plane_x_m = 0`. With the exported grid dimensions and pitches, its sample positions in meters are:
+
+```text
+X = 0
+Y = (column - (resolution_x - 1) / 2.0) * pixel_pitch_x_m
+Z = ((resolution_y - 1) / 2.0 - row) * pixel_pitch_y_m
+```
+
+No SLM world transform is exported; these positions use the local optical frame.
+
+For external NumPy consumers:
+
+```python
+import json
+from pathlib import Path
+import numpy as np
+
+metadata_path = Path("/path/to/Phase_...json")
+metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+phase_rad = np.fromfile(
+    metadata_path.parent / metadata["binary_filename"], dtype="<f8"
+).reshape(metadata["resolution_y"], metadata["resolution_x"])
+```
+
+To reuse the Unreal asset, select it in **Stored Phase Pattern** on the SLM and click **Load Stored Phase Pattern**. Loading retains the existing nearest-neighbor resize behavior if the saved grid and current SLM resolution differ; it does not restore the saved pitch or scene settings. Use the same resolution and pitch when reproducing the original physical phase plane. Save the level if the selected asset reference should persist. Active phase data itself remains transient.
+
+Persistence is editor-only; Game builds return an unsupported-operation status. The explicit Save call performs synchronous disk and asset work, so large grids can take time. It is independent of the asynchronous CPU solve and is never invoked by **Generate Phase Pattern** or **Auto Solve**.
+
 ## Verification record
 
-Verified on **2026-09-21** with UE 5.8.2:
+**Pixel-accurate PNG follow-up — 2026-09-21, UE 5.8.2 on Linux:** Editor/Game Linux Development builds passed, exit code 0, and all **49 headless CGH tests passed**, with zero warnings, failures, or not-run tests. The added `PixelAccurateGrayscalePNG` test checks asymmetric 3×2 and 1×1 grids. A separate native CPU solve at 257×129 was saved twice; an independent Pillow decoder matched all **66,306 pixels** across the two PNGs, including exact dimensions, single-channel mode `L`, and row order. Full-precision raw phase data was preserved.
+
+Report: `Saved/Automation/CGHPhasePng/index.json`; smoke scripts/evidence: `Saved/Automation/CGHPhasePngSmoke/`. Logs under `Saved/Logs`: `CGHPhasePngEditorBuild_2026-09-21.log`, `CGHPhasePngGameBuild_2026-09-21.log`, `CGHPhasePngTests_2026-09-21.log`, and `CGHPhasePngSmoke_2026-09-21.log`. Interactive save responsiveness and Windows behavior remain unverified. The 48-test result below retains the earlier asset/numerical-file milestone.
+
+**Explicit phase saving — 2026-09-21, UE 5.8.2 on Linux:**
+
+- Editor and Game Linux Development builds passed, exit code 0. All **48 headless CGH tests passed**, with zero warnings, failures, or not-run tests. The six added save tests cover exact numerical export and asset reload, unique repeated saves, invalid inputs/directory failures, SLM state preservation, solver publication guards, and explicit-only saving after automatic generation. Project-relative raw paths are covered, including the correction for an engine-relative `ProjectDir`.
+- Separate writer and fresh-process reload smoke checks passed, exit code 0, confirming exact bytes, repeated-save uniqueness, and no automatic saving. All **11 original asset/map hashes** remained unchanged. Temporary save fixtures were removed.
+- Report: `Saved/Automation/CGHPhaseSave/index.json`. Logs under `Saved/Logs`: `CGHPhaseSaveEditorBuild_2026-09-21.log`, `CGHPhaseSaveGameBuild_2026-09-21.log`, `CGHPhaseSaveTests_2026-09-21.log`, `CGHPhaseSaveWrite_2026-09-21.log`, and `CGHPhaseSaveReload_2026-09-21.log`. Smoke scripts and manifest remain under `Saved/Automation/CGHPhaseSaveSmoke/` as local ignored evidence.
+
+The save feature has not been assessed for interactive GUI responsiveness or Windows behavior. Large saves still perform synchronous work. The following results retain the earlier CPU solver milestone; its performance measurements do not measure saving.
+
+**CPU PointFocus — 2026-09-21, UE 5.8.2:**
 
 - Editor and Game Linux Development builds passed, exit code 0.
 - **42 headless CGH tests passed**, with zero test failures, warnings, or not-run tests. This includes six numerical PointFocus tests and ten solver-actor/lifecycle tests. Independent complex propagation verifies incident plane-wave phase + SLM phase + `k*r` equals the requested target phase, including oblique illumination and a rotated SLM frame. Coverage also includes centered grids, invalid inputs, cancellation/replacement, stale-result rejection, automatic updates/recovery, move publication, duplication, and teardown.

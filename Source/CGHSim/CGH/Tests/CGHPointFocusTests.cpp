@@ -10,7 +10,7 @@
 
 namespace
 {
-	constexpr double TwoPi = 2.0 * UE_DOUBLE_PI;
+	constexpr double PointFocusTestTwoPi = 2.0 * UE_DOUBLE_PI;
 
 	FCGHSolverInput MakePointFocusInput()
 	{
@@ -32,7 +32,7 @@ namespace
 
 	double CircularDifference(double First, double Second)
 	{
-		return std::abs(std::remainder(First - Second, TwoPi));
+		return std::abs(std::remainder(First - Second, PointFocusTestTwoPi));
 	}
 }
 
@@ -74,13 +74,13 @@ bool FCGHPointFocusPropagationTest::RunTest(const FString& Parameters)
 		for (int32 Column = 0; Column < 4; ++Column)
 		{
 			const double Phase = Result.Pattern.PhaseRad[Row * 4 + Column];
-			TestTrue(TEXT("Every phase lies in the half-open [0, 2pi) interval"), Phase >= 0.0 && Phase < TwoPi);
+			TestTrue(TEXT("Every phase lies in the half-open [0, 2pi) interval"), Phase >= 0.0 && Phase < PointFocusTestTwoPi);
 			const double DY = Target.Y - ColumnY[Column];
 			const double DZ = Target.Z - RowZ[Row];
 			const double R = std::sqrt(Target.X * Target.X + DY * DY + DZ * DZ);
 			// Propagate independent unit complex fields using the declared positive propagation sign.
 			const std::complex<double> Field = std::polar(1.0, Phase)
-				* std::polar(1.0, TwoPi * R / Input.Scene.ReconstructionLight.WavelengthM);
+				* std::polar(1.0, PointFocusTestTwoPi * R / Input.Scene.ReconstructionLight.WavelengthM);
 			TestTrue(TEXT("Each pixel arrives with the desired target phase"), std::abs(Field - Desired) < 2.0e-9);
 			Sum += Field;
 		}
@@ -126,13 +126,13 @@ bool FCGHPointFocusCenteringTest::RunTest(const FString& Parameters)
 		{
 			const double CenterPhase = Result.Pattern.PhaseRad[(Dimensions.Y / 2) * Dimensions.X + Dimensions.X / 2];
 			TestTrue(TEXT("An odd grid's central pixel sits exactly at the SLM origin"),
-				CircularDifference(CenterPhase, 0.3 - TwoPi * 0.2 / 0.4) < 1.0e-12);
+				CircularDifference(CenterPhase, 0.3 - PointFocusTestTwoPi * 0.2 / 0.4) < 1.0e-12);
 		}
 		if (Dimensions == FIntPoint(4, 2))
 		{
 			const double CornerDistance = std::sqrt(0.2 * 0.2 + 0.0195 * 0.0195 + 0.0105 * 0.0105);
 			TestTrue(TEXT("Even grids use half-pixel centers on both axes"),
-				CircularDifference(Result.Pattern.PhaseRad[0], 0.3 - TwoPi * CornerDistance / 0.4) < 1.0e-12);
+				CircularDifference(Result.Pattern.PhaseRad[0], 0.3 - PointFocusTestTwoPi * CornerDistance / 0.4) < 1.0e-12);
 		}
 	}
 	return true;
@@ -177,7 +177,7 @@ bool FCGHPointFocusDirectionsTest::RunTest(const FString& Parameters)
 	const FCGHSolverResult Negative = CGHPointFocus::Solve(Input, CancelRequested);
 	TestTrue(TEXT("Signed target depth on either side of the SLM is supported"), Negative.bSucceeded);
 	TestTrue(TEXT("Mirroring target X preserves all source-to-target distances"), Negative.Pattern.PhaseRad == Positive.Pattern.PhaseRad);
-	Input.Scene.Targets[0].PhaseRad += 10.0 * TwoPi + 0.7;
+	Input.Scene.Targets[0].PhaseRad += 10.0 * PointFocusTestTwoPi + 0.7;
 	const FCGHSolverResult Shifted = CGHPointFocus::Solve(Input, CancelRequested);
 	if (!TestTrue(TEXT("Target phase offset computes successfully"), Shifted.bSucceeded))
 	{
@@ -298,7 +298,7 @@ bool FCGHPointFocusPlaneWaveTest::RunTest(const FString& Parameters)
 	const double ColumnY[] = {-12.0e-6, -4.0e-6, 4.0e-6, 12.0e-6};
 	const double RowZ[] = {13.0e-6, 0.0, -13.0e-6};
 	const FVector Target = Input.Scene.Targets[0].PositionSLMM;
-	const double K = TwoPi / Input.Scene.ReconstructionLight.WavelengthM;
+	const double K = PointFocusTestTwoPi / Input.Scene.ReconstructionLight.WavelengthM;
 	const std::complex<double> Desired = std::polar(1.0, Input.Scene.Targets[0].PhaseRad);
 	std::complex<double> Sum(0.0, 0.0);
 	for (int32 Row = 0; Row < 3; ++Row)

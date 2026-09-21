@@ -15,7 +15,7 @@ public class CGHSim : ModuleRules
 
 		if (Target.bBuildEditor)
 		{
-			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "PropertyEditor", "Slate", "SlateCore" });
+			PrivateDependencyModuleNames.AddRange(new string[] { "UnrealEd", "PropertyEditor", "Slate", "SlateCore", "AssetRegistry", "Json", "ImageCore" });
 		}
 
 		// Uncomment if you are using Slate UI

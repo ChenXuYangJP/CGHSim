@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "CGH/Types/CGHTypes.h"
 #include "CGH/Types/CGHSLMPhasePattern.h"
+#include "UObject/SoftObjectPath.h"
 #include "CGHSLMActor.generated.h"
 
 class UArrowComponent;
@@ -57,6 +58,29 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CGH|Phase")
 	TSoftObjectPtr<UCGHPhasePatternAsset> StoredPhasePattern;
 
+	/** Content Browser destination for uniquely named reusable phase assets. Must be under /Game. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CGH|Phase|Save", meta = (ContentDir))
+	FDirectoryPath PhaseAssetSaveFolder;
+
+	/** Raw .bin/.json and grayscale .png destination; relative paths are resolved against the project directory. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CGH|Phase|Save")
+	FDirectoryPath PhaseRawSaveDirectory;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Phase|Save")
+	FString PhaseSaveStatus = TEXT("No phase pattern saved.");
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Phase|Save")
+	TSoftObjectPtr<UCGHPhasePatternAsset> LastSavedPhaseAsset;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Phase|Save")
+	FString LastSavedPhaseBinaryFile;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Phase|Save")
+	FString LastSavedPhaseMetadataFile;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Phase|Save")
+	FString LastSavedPhaseImageFile;
+
 	/** Identifies the currently loaded sample; empty for ordinary phase publication. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Phase")
 	FText PhasePatternLabel;
@@ -79,6 +103,13 @@ public:
 	/** Load the saved phase grid, using nearest-neighbor sampling to match the current SLM resolution. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Phase")
 	void LoadStoredPhasePattern();
+
+	/** Editor-only explicit save of the current active grid to an asset, full-precision raw files, and a grayscale PNG. */
+	UFUNCTION(BlueprintCallable, Category = "CGH|Phase|Save")
+	bool SaveCurrentPhasePattern();
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Phase|Save")
+	void SavePhasePattern();
 
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Phase")
 	void ClearPhasePattern();

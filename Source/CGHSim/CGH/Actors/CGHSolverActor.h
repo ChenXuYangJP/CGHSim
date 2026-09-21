@@ -67,6 +67,16 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
 	void GeneratePhasePattern();
 
+	/** Saves this solver's accepted result if it is still the active SLM pattern. */
+	UFUNCTION(BlueprintCallable, Category = "CGH|Solver|Save")
+	bool SaveGeneratedPhasePattern();
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver|Save")
+	void SavePhasePattern();
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Solver|Save")
+	FString PhaseSaveStatus = TEXT("Generate a phase pattern, then press Save Phase Pattern.");
+
 	/** Cooperative cancellation leaves the last published SLM pattern intact. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
 	void CancelSolve();
@@ -88,6 +98,8 @@ private:
 	TOptional<FCGHSolverSubmission> LastAttempt;
 	bool bAcceptActiveResult = false;
 	bool bPolling = false;
+	TWeakObjectPtr<ACGHSLMActor> LastPublishedSLM;
+	uint64 LastPublishedPhaseRevision = 0;
 
 	bool CaptureSubmission(FCGHSolverSubmission& Out, FString& Error);
 	static bool SameInputs(const FCGHSolverSubmission& A, const FCGHSolverSubmission& B);

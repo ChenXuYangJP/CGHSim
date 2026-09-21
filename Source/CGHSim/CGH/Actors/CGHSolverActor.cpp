@@ -164,6 +164,34 @@ void ACGHSolverActor::GeneratePhasePattern()
 	StartSolve();
 }
 
+bool ACGHSolverActor::SaveGeneratedPhasePattern()
+{
+	check(IsInGameThread());
+	if (IsTemplate() || IsActorBeingDestroyed() || JobState != ECGHSolverJobState::Ready
+		|| ActiveJob || PendingSubmission.IsSet())
+	{
+		PhaseSaveStatus = TEXT("Wait for a generated phase pattern to reach Ready before saving.");
+		return false;
+	}
+	ACGHSLMActor* SLM = LastPublishedSLM.Get();
+	if (!IsValid(Workbench) || Workbench->IsActorBeingDestroyed() || Workbench->GetWorld() != GetWorld()
+		|| !IsValid(SLM) || SLM->IsActorBeingDestroyed() || SLM->GetWorld() != GetWorld()
+		|| Workbench->SLM != SLM || !SLM->HasValidPhasePattern()
+		|| SLM->GetPhasePatternRevision() != LastPublishedPhaseRevision)
+	{
+		PhaseSaveStatus = TEXT("The generated result is no longer the active SLM pattern. Generate again, or save the current pattern from the SLM.");
+		return false;
+	}
+	const bool bSaved = SLM->SaveCurrentPhasePattern();
+	PhaseSaveStatus = SLM->PhaseSaveStatus;
+	return bSaved;
+}
+
+void ACGHSolverActor::SavePhasePattern()
+{
+	SaveGeneratedPhasePattern();
+}
+
 void ACGHSolverActor::SubmitPending()
 {
 	check(!ActiveJob && PendingSubmission.IsSet());
@@ -227,6 +255,8 @@ void ACGHSolverActor::PollSolver()
 				ACGHSLMActor* Destination = Current.SLM.Get();
 				if (Destination->SetPhasePattern(MoveTemp(ActiveJob->Result.Pattern)))
 				{
+					LastPublishedSLM = Destination;
+					LastPublishedPhaseRevision = Destination->GetPhasePatternRevision();
 					JobState = ECGHSolverJobState::Ready;
 					StatusMessage = TEXT("PointFocus phase published with plane-wave illumination compensation (exp(+i k r)).");
 				}
@@ -290,6 +320,8 @@ void ACGHSolverActor::StopJobs()
 	ActiveSubmission.Reset();
 	PendingSubmission.Reset();
 	LastAttempt.Reset();
+	LastPublishedSLM.Reset();
+	LastPublishedPhaseRevision = 0;
 	bAcceptActiveResult = false;
 	JobState = ECGHSolverJobState::Idle;
 	StatusMessage = TEXT("Solver stopped; the last published phase pattern is retained.");

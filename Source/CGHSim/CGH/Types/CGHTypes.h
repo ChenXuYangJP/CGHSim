@@ -42,11 +42,11 @@ struct CGHSIM_API FCGHSLMParameters
 
 	/** Horizontal column count along SLM-local Y. X names the image/grid axis. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "1"))
-	int32 ResolutionX = 4096;
+	int32 ResolutionX = 256;
 
 	/** Vertical row count along SLM-local Z; increasing row points toward -Z. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "1"))
-	int32 ResolutionY = 4096;
+	int32 ResolutionY = 256;
 
 	/** Positive horizontal column spacing in micrometers, along SLM-local +Y. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SLM", meta = (ClampMin = "0.001", Units = "um"))

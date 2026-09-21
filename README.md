@@ -4,14 +4,14 @@
 
 CGHSim provides an editable scene for arranging a target, spatial light modulator (SLM), camera, and reconstruction light. Native C++ actors define optical parameters and validation; Blueprint children provide scene presentation.
 
-**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for one point target, compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
+**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for one point target, compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. An explicit Save button persists the current phase as a reusable Unreal asset, numerical files, and an exact-resolution grayscale PNG. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
 
 ## What works today
 
 | Component | Current capabilities |
 | --- | --- |
 | **Target** | Point or static-mesh targets, configurable contour slicing and point spacing, versioned geometry/point-cloud resources, and a cached debug point-cloud view. |
-| **SLM** | Editable resolution/pitch and physical active area, validated transient phase storage, and an exact-resolution grayscale preview on selection. Includes explicit test-ramp and clear controls. |
+| **SLM** | Editable resolution/pitch and physical active area, validated transient phase storage, and an exact-resolution grayscale preview on selection. Includes explicit test-ramp, clear, and Save controls; saving writes a reusable phase asset, full-precision raw data, metadata, and a pixel-accurate grayscale PNG. |
 | **Camera** | Double-precision optical parameters synchronized to a Cine Camera preview, including focal length, aperture, sensor dimensions, and focus distance. |
 | **Reconstruction light** | Editable source/optical parameters. PointFocus uses PlaneWave wavelength, initial phase, and direction, with phase referenced to the SLM origin; amplitude/polarization are validated but unused by the scalar phase model. |
 | **Workbench** | Explicit actor references, an automatically updated SI scene description, configuration validation, and optional solver command/status controls. |
@@ -68,7 +68,8 @@ In the editor:
 3. Select **CGH Workbench** to inspect the automatically updated **Scene Description**, or click **Validate Scene** or **Refresh Visualization**.
 4. Select the SLM for its phase inset; click **CGH > Phase > Load Stored Phase Pattern** to activate the bundled saved sample, or **Clear Phase Pattern** to remove it. **Generate Preview Phase Ramp** provides another display check. These samples do not run a solver.
 5. For a computed point-focus pattern, add **CGH Solver Actor**, set its **Workbench**, and use exactly one **Point** target off the SLM plane with a **PlaneWave** reconstruction light. Click **Generate Phase Pattern** with **CPU / PointFocus** selected; enable **Auto Solve** only if wanted. The [solver guide](Docs/CGH_PointFocus_Solver.md) covers workbench buttons, assumptions, and status.
-6. Save the level to preserve parameter and placement changes. Phase data is transient and must be supplied or generated again after reopening.
+6. After the solver reaches **Ready**, click its **Save Phase Pattern** button to save a reusable Unreal asset, raw numerical files, and a grayscale PNG with one image pixel per SLM pixel. Configure the destinations on the SLM: **Phase Asset Save Folder** defaults to `/Game/CGHSim/PhasePatterns/Generated`; **Phase Raw Save Directory** defaults to `Saved/CGHSim/PhasePatterns` under the project. The SLM also has its own **Save Phase Pattern** button for any valid current pattern. See [saving and reloading](Docs/CGH_PointFocus_Solver.md#saving-and-reloading-phase-patterns).
+7. Save the level to preserve parameter and placement changes. Active phase data remains transient; after reopening, select a saved asset in the SLM's **Stored Phase Pattern** and click **Load Stored Phase Pattern**, or generate again. Save does not change that asset selection automatically.
 
 The SLM is shown at its physical dimensions: the native default `4096 × 4096` pixels at `8 µm` pitch produce an active area of **32.768 × 32.768 mm**. Frame the SLM separately for a close view. Its phase inset scales to a readable size independently of physical pitch; **Camera Preview Size** controls the inset size. For point targets, the sphere is a selection marker rather than the mathematical point's physical extent. Mesh targets use their assigned static mesh and support **Show Point Cloud**.
 
@@ -86,7 +87,7 @@ CGHSim/
 │       ├── Components/              # Point-cloud rendering and SLM phase preview
 │       ├── Solver/                  # Backend interface and CPU PointFocus
 │       ├── Types/                   # Optical descriptions, resources, phase pattern, jobs
-│       ├── Utils/                   # Unit conversion, mesh sampling, phase grayscale
+│       ├── Utils/                   # Unit conversion, mesh sampling, phase grayscale and persistence
 │       └── Tests/                   # Headless and Slate-render automation
 ├── Content/CGHSim/
 │   ├── Blueprints/                 # Scene Blueprint children; optional generated solver
@@ -153,6 +154,10 @@ Run the headless CGH automation tests after building the Editor target:
 ```
 
 ### Recorded verification
+
+**2026-09-21 — pixel-accurate PNG export:** Editor/Game Linux Development builds and all **49 headless CGH tests passed**. An independent Pillow decoder checked every grayscale pixel in two 257×129 CPU-generated exports, with exact dimensions and row order; raw phase precision was preserved. See the [PNG verification record](Docs/CGH_PointFocus_Solver.md#verification-record).
+
+**2026-09-21 — explicit phase saving:** Editor/Game Linux Development builds and all **48 headless CGH tests passed**. Separate write and fresh-process reload checks verified exact numerical bytes, unique repeated saves, and explicit-only persistence. All 11 original assets/maps were unchanged; temporary save fixtures were removed. See the [save verification record](Docs/CGH_PointFocus_Solver.md#verification-record). Interactive Save responsiveness remains unverified.
 
 **2026-09-21 — CPU PointFocus solver:** Editor/Game builds and all **42 headless CGH tests passed**, including plane-wave phase compensation and asynchronous job lifecycle checks. A no-save 4096×4096 solve, cancellation, and existing SLM Blueprint activation also passed; all 11 existing assets/maps were preserved. See the [solver verification record](Docs/CGH_PointFocus_Solver.md#verification-record) for coverage and timings.
 

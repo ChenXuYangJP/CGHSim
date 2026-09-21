@@ -3,6 +3,7 @@
 #include "CGH/Types/CGHPhasePatternAsset.h"
 #include "CGH/Utils/CGHUnitConversion.h"
 #include "CGH/Utils/CGHPhasePreview.h"
+#include "CGH/Utils/CGHPhasePatternIO.h"
 #include "CGH/Components/CGHSLMPreviewComponent.h"
 #include "Components/ArrowComponent.h"
 #include "Components/SceneComponent.h"
@@ -17,6 +18,8 @@ ACGHSLMActor::ACGHSLMActor()
 	PrimaryActorTick.bStartWithTickEnabled = true;
 	PrimaryActorTick.bTickEvenWhenPaused = true;
 	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
+	PhaseAssetSaveFolder.Path = TEXT("/Game/CGHSim/PhasePatterns/Generated");
+	PhaseRawSaveDirectory.Path = TEXT("Saved/CGHSim/PhasePatterns");
 	StoredPhasePattern = TSoftObjectPtr<UCGHPhasePatternAsset>(FSoftObjectPath(
 		TEXT("/Game/CGHSim/PhasePatterns/DA_SLMPreviewPattern.DA_SLMPreviewPattern")));
 	PhasePattern.ResolutionX = Parameters.ResolutionX;
@@ -159,6 +162,38 @@ void ACGHSLMActor::LoadStoredPhasePattern()
 		PhasePatternLabel = Asset->PatternLabel.IsEmpty() ? FText::FromString(Asset->GetName()) : Asset->PatternLabel;
 		UpdateVisualizationComponents();
 	}
+}
+
+bool ACGHSLMActor::SaveCurrentPhasePattern()
+{
+	check(IsInGameThread());
+	if (IsTemplate() || IsActorBeingDestroyed() || !HasValidPhasePattern())
+	{
+		PhaseSaveStatus = TEXT("Nothing to save: generate or load a valid phase pattern matching the current SLM grid first.");
+		return false;
+	}
+	FCGHPhaseSaveResult Result;
+	const FText SavedLabel = PhasePatternLabel.IsEmpty()
+		? NSLOCTEXT("CGH", "SavedActivePhasePattern", "SLM phase pattern") : PhasePatternLabel;
+	if (!CGHPhasePatternIO::Save(PhasePattern,
+		CGHUnits::UmToM(Parameters.PixelPitchXUm), CGHUnits::UmToM(Parameters.PixelPitchYUm),
+		PhaseAssetSaveFolder.Path, PhaseRawSaveDirectory.Path, SavedLabel, bIsPreviewPhasePattern, Result))
+	{
+		PhaseSaveStatus = Result.Error;
+		return false;
+	}
+	LastSavedPhaseAsset = TSoftObjectPtr<UCGHPhasePatternAsset>(FSoftObjectPath(Result.AssetPath));
+	LastSavedPhaseBinaryFile = Result.BinaryFilename;
+	LastSavedPhaseMetadataFile = Result.MetadataFilename;
+	LastSavedPhaseImageFile = Result.ImageFilename;
+	PhaseSaveStatus = FString::Printf(TEXT("Saved phase asset: %s\nRaw phase: %s\nMetadata: %s\nGrayscale image: %s"),
+		*Result.AssetPath, *Result.BinaryFilename, *Result.MetadataFilename, *Result.ImageFilename);
+	return true;
+}
+
+void ACGHSLMActor::SavePhasePattern()
+{
+	SaveCurrentPhasePattern();
 }
 
 void ACGHSLMActor::ClearPhasePattern()
