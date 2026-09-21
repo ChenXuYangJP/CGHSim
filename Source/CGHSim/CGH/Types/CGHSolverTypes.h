@@ -10,7 +10,7 @@ UENUM(BlueprintType)
 enum class ECGHSolverBackend : uint8
 {
 	CPU,
-	Docker UMETA(DisplayName = "Docker (not implemented)")
+	Docker UMETA(DisplayName = "Docker (TCP dummy)")
 };
 
 UENUM(BlueprintType)
@@ -38,6 +38,27 @@ enum class ECGHPropagationConvention : uint8
 	ExpPositiveIKR
 };
 
+/** Copied into each network job; workers never access endpoint UObject state. */
+USTRUCT(BlueprintType)
+struct CGHSIM_API FCGHDockerSolverSettings
+{
+	GENERATED_BODY()
+
+	/** Numeric IPv4 address of the published TCP port (no blocking DNS lookup). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Docker")
+	FString Address = TEXT("127.0.0.1");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Docker", meta = (ClampMin = "1", ClampMax = "65535"))
+	int32 Port = 7000;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Docker", meta = (ClampMin = "0.1", Units = "s"))
+	double ConnectTimeoutSeconds = 5.0;
+
+	/** Total request deadline including serialization, connection, send, and reception. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Docker", meta = (ClampMin = "0.1", Units = "s"))
+	double RequestTimeoutSeconds = 30.0;
+};
+
 USTRUCT(BlueprintType)
 struct CGHSIM_API FCGHSolverParameters
 {
@@ -48,6 +69,9 @@ struct CGHSIM_API FCGHSolverParameters
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver")
 	ECGHSolverAlgorithm Algorithm = ECGHSolverAlgorithm::PointFocus;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Solver", meta = (EditCondition = "SolverBackend == ECGHSolverBackend::Docker"))
+	FCGHDockerSolverSettings Docker;
 };
 
 /** Owned numerical snapshot: no actor pointers or UObject access is permitted in workers. */

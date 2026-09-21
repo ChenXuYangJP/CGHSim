@@ -5,7 +5,7 @@
 #include "UObject/Object.h"
 #include "CGHSolverBackend.generated.h"
 
-/** Backend boundary shared by local CPU and future network solver implementations. */
+/** Backend boundary shared by local CPU and asynchronous TCP solver implementations. */
 UCLASS(Abstract)
 class CGHSIM_API UCGHSolverBackend : public UObject
 {

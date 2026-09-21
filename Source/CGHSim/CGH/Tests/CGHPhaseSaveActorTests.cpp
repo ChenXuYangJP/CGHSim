@@ -286,7 +286,7 @@ bool FCGHGeneratedPhaseSaveGuardTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-	Scene.Solver->Parameters.SolverBackend = ECGHSolverBackend::Docker;
+	Scene.Solver->Parameters.SolverBackend = static_cast<ECGHSolverBackend>(255);
 	TestFalse(TEXT("An unsupported new request fails"), Scene.Solver->StartSolve());
 	TestFalse(TEXT("Failed jobs cannot save a retained previous pattern through the solver"), Scene.Solver->SaveGeneratedPhasePattern());
 	TestEqual(TEXT("Later rejected saves leave previous output files intact"), Scene.FileCount(), SavedFiles);

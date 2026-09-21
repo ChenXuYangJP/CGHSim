@@ -79,7 +79,7 @@ UE scene actors and cached mesh point clouds
     -> selected-SLM phase preview
 ```
 
-`ACGHSolverActor` owns job state, request identifiers, cancellation, queued input, and accepted publication. `UCGHSolverBackend::Submit()` is the replaceable backend boundary. `UCGHCPUSolverBackend` schedules the pure numerical calculation on Unreal's thread pool. A future `UCGHDockerSolverBackend` can implement this boundary; **Docker** currently produces a clear failure and performs no networking.
+`ACGHSolverActor` owns job state, request identifiers, cancellation, queued input, and accepted publication. `UCGHSolverBackend::Submit()` is the replaceable backend boundary. `UCGHCPUSolverBackend` schedules the pure numerical calculation on Unreal's thread pool. `UCGHDockerSolverBackend` now implements the same boundary using asynchronous TCP and the standalone `Backend/V100` dummy server. Its output validates transport and publication only; the CPU backend and PointFocus numerical implementation are unchanged. See the [Docker backend guide](CGH_Docker_Backend.md).
 
 The worker receives an owned, immutable `FCGHSolverInput` snapshot containing plain copied scene data and the required point-cloud resources, plus a shared plain-data `FCGHSolverJob` with cancellation/completion flags and output. It never reads Actors or other UObjects. Only the worker writes its result, and the game thread reads it after the atomic completion flag is published. There is no per-pixel scene query or cross-thread Actor communication.
 

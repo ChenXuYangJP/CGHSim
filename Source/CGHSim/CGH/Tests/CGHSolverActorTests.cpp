@@ -497,8 +497,8 @@ bool FCGHSolverInputValidationTest::RunTest(const FString& Parameters)
 		TestFalse(TEXT("Rejected input has a diagnostic"), Scene.Solver->StatusMessage.IsEmpty());
 		TestEqual(TEXT("Rejected input preserves the previous SLM pattern"), Scene.SLM->GetPhasePatternRevision(), BeforeRevision);
 	};
-	Scene.Solver->Parameters.SolverBackend = ECGHSolverBackend::Docker;
-	CheckRejected(TEXT("Docker is explicitly unsupported in the CPU reference implementation"));
+	Scene.Solver->Parameters.SolverBackend = static_cast<ECGHSolverBackend>(255);
+	CheckRejected(TEXT("Unknown backend is explicitly rejected"));
 	Scene.Solver->Parameters.SolverBackend = ECGHSolverBackend::CPU;
 	Scene.Light->Parameters.SourceType = ECGHSourceType::PointSource;
 	CheckRejected(TEXT("Point-source illumination is unsupported by this plane-wave solver"));

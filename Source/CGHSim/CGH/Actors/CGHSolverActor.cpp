@@ -5,6 +5,7 @@
 #include "CGH/Actors/CGHTargetActor.h"
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Solver/CGHCPUSolverBackend.h"
+#include "CGH/Solver/CGHDockerSolverBackend.h"
 #include "CGH/Solver/CGHPointFocus.h"
 #include "Components/SceneComponent.h"
 
@@ -127,6 +128,14 @@ bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolver
 	{
 		return X == Y || (FMath::IsNaN(X) && FMath::IsNaN(Y));
 	};
+	if (A.Parameters.SolverBackend == ECGHSolverBackend::Docker
+		&& (A.Parameters.Docker.Address != B.Parameters.Docker.Address
+			|| A.Parameters.Docker.Port != B.Parameters.Docker.Port
+			|| !SameScalar(A.Parameters.Docker.ConnectTimeoutSeconds, B.Parameters.Docker.ConnectTimeoutSeconds)
+			|| !SameScalar(A.Parameters.Docker.RequestTimeoutSeconds, B.Parameters.Docker.RequestTimeoutSeconds)))
+	{
+		return false;
+	}
 	const FCGHSceneDescription& X = A.Input.Scene;
 	const FCGHSceneDescription& Y = B.Input.Scene;
 	if (X.SchemaVersion != Y.SchemaVersion || X.Targets.Num() != Y.Targets.Num()
@@ -142,6 +151,26 @@ bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolver
 	{
 		return false;
 	}
+	// Network requests carry the complete canonical scene. Preserve the CPU's existing
+	// consumed-input guard, while any transmitted Docker scene edit invalidates its reply.
+	if (A.Parameters.SolverBackend == ECGHSolverBackend::Docker)
+	{
+		const FCGHReconstructionLightDescription& LX = X.ReconstructionLight;
+		const FCGHReconstructionLightDescription& LY = Y.ReconstructionLight;
+		const FCGHCameraDescription& CX = X.Camera;
+		const FCGHCameraDescription& CY = Y.Camera;
+		if (!SameScalar(X.SLM.ActiveWidthM, Y.SLM.ActiveWidthM) || !SameScalar(X.SLM.ActiveHeightM, Y.SLM.ActiveHeightM)
+			|| !SameScalar(LX.Amplitude, LY.Amplitude) || !SameScalar(LX.PolarizationAngleRad, LY.PolarizationAngleRad)
+			|| LX.PositionSLMM != LY.PositionSLMM
+			|| CX.OpticalPositionSLMM != CY.OpticalPositionSLMM || CX.ForwardDirectionSLM != CY.ForwardDirectionSLM
+			|| !SameScalar(CX.FocalLengthM, CY.FocalLengthM) || !SameScalar(CX.FNumber, CY.FNumber)
+			|| !SameScalar(CX.FocusDistanceM, CY.FocusDistanceM)
+			|| !SameScalar(CX.SensorWidthM, CY.SensorWidthM) || !SameScalar(CX.SensorHeightM, CY.SensorHeightM)
+			|| CX.OutputResolutionX != CY.OutputResolutionX || CX.OutputResolutionY != CY.OutputResolutionY)
+		{
+			return false;
+		}
+	}
 	for (int32 Index = 0; Index < X.Targets.Num(); ++Index)
 	{
 		const FCGHTargetDescription& First = X.Targets[Index];
@@ -155,6 +184,12 @@ bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolver
 		{
 			return false;
 		}
+		if (A.Parameters.SolverBackend == ECGHSolverBackend::Docker
+			&& (First.ResourceId != Second.ResourceId || First.Revision != Second.Revision
+				|| !First.RotationSLM.Equals(Second.RotationSLM, 0.0)))
+		{
+			return false;
+		}
 		if (First.TargetType == ECGHTargetType::Mesh
 			&& (First.ResourceId != Second.ResourceId || First.Revision != Second.Revision
 				|| !First.RotationSLM.Equals(Second.RotationSLM, 0.0)))
@@ -162,7 +197,7 @@ bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolver
 			return false;
 		}
 	}
-	// Light magnitude/polarization/position and point orientation do not affect this scalar phase.
+	// For CPU, light magnitude/polarization/position and point orientation do not affect this scalar phase.
 	// Mesh revisions track cloud shape, component/actor scale, sampling, and per-sample optical data.
 	return true;
 }
@@ -196,9 +231,9 @@ bool ACGHSolverActor::StartSolve()
 	}
 	LastAttempt = Submission;
 	++JobId;
-	if (Parameters.SolverBackend != ECGHSolverBackend::CPU)
+	if (Parameters.SolverBackend != ECGHSolverBackend::CPU && Parameters.SolverBackend != ECGHSolverBackend::Docker)
 	{
-		FailRequest(TEXT("Docker/TCP backend is not implemented. Select CPU for PointFocus."));
+		FailRequest(TEXT("Unsupported solver backend."));
 		return false;
 	}
 	if (ActiveJob)
@@ -208,7 +243,9 @@ bool ACGHSolverActor::StartSolve()
 	bAcceptActiveResult = false;
 	PendingSubmission = MoveTemp(Submission);
 	JobState = ECGHSolverJobState::Queued;
-	StatusMessage = TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r)).");
+	StatusMessage = Parameters.SolverBackend == ECGHSolverBackend::Docker
+		? TEXT("Docker TCP dummy request queued; no optical computation is performed.")
+		: TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r)).");
 	// A replaced worker is reaped before another starts, bounding large output buffers.
 	if (!ActiveJob)
 	{
@@ -262,7 +299,15 @@ void ACGHSolverActor::SubmitPending()
 		FailRequest(Error.IsEmpty() ? TEXT("Queued inputs or SLM phase changed; generate again.") : Error);
 		return;
 	}
-	if (!Backend)
+	if (PendingSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker)
+	{
+		if (!Cast<UCGHDockerSolverBackend>(Backend))
+		{
+			Backend = NewObject<UCGHDockerSolverBackend>(this);
+		}
+		CastChecked<UCGHDockerSolverBackend>(Backend)->Settings = PendingSubmission->Parameters.Docker;
+	}
+	else if (!Cast<UCGHCPUSolverBackend>(Backend))
 	{
 		Backend = NewObject<UCGHCPUSolverBackend>(this);
 	}
@@ -325,7 +370,9 @@ void ACGHSolverActor::PollSolver()
 					LastPublishedSLM = Destination;
 					LastPublishedPhaseRevision = Destination->GetPhasePatternRevision();
 					JobState = ECGHSolverJobState::Ready;
-					StatusMessage = TEXT("PointFocus complex-field phase published with plane-wave illumination compensation (exp(+i k r)).");
+					StatusMessage = ActiveSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker
+						? TEXT("Docker TCP dummy phase published to SLM; this is a transport test, not an optical solution.")
+						: TEXT("PointFocus complex-field phase published with plane-wave illumination compensation (exp(+i k r)).");
 				}
 				else
 				{
@@ -345,7 +392,9 @@ void ACGHSolverActor::PollSolver()
 		&& ActiveJob->bStarted.load(std::memory_order_acquire))
 	{
 		JobState = ECGHSolverJobState::Running;
-		StatusMessage = TEXT("Summing point and mesh complex fields on the CPU worker.");
+		StatusMessage = ActiveSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker
+			? TEXT("Docker TCP request in progress; waiting for the dummy backend result.")
+			: TEXT("Summing point and mesh complex fields on the CPU worker.");
 	}
 	if (bAutoSolve)
 	{

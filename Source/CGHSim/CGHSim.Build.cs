@@ -8,10 +8,12 @@ public class CGHSim : ModuleRules
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 		PublicIncludePaths.Add(ModuleDirectory);
+		// Engine-independent wire contract shared with the standalone CMake server.
+		PrivateIncludePaths.Add(System.IO.Path.GetFullPath(System.IO.Path.Combine(ModuleDirectory, "../../Backend/V100/include")));
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput", "CinematicCamera" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "RHI" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "RenderCore", "RHI", "Sockets", "Networking" });
 
 		if (Target.bBuildEditor)
 		{
