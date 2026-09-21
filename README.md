@@ -4,7 +4,7 @@
 
 CGHSim provides an editable scene for arranging a target, spatial light modulator (SLM), camera, and reconstruction light. Native C++ actors define optical parameters and validation; Blueprint children provide scene presentation.
 
-**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for multiple Point and Mesh targets by summing their complex fields, then compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. An explicit Save button persists the current phase as a reusable Unreal asset, numerical files, and an exact-resolution grayscale PNG. A second Docker/TCP backend runs the same PointFocus algorithm on the selected V100 using CUDA 12.9.2. The standalone server also retains an explicit dummy mode for transport tests. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
+**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for multiple Point and Mesh targets by summing their complex fields, then compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. An explicit Save button persists the current phase as a reusable Unreal asset, numerical files, and an exact-resolution grayscale PNG. A second Docker/TCP backend runs the same PointFocus algorithm across the selected V100 GPUs using CUDA 12.9.2. The standalone server also retains an explicit dummy mode for transport tests. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
 
 ## What works today
 
@@ -79,10 +79,10 @@ For the optional Docker backend, see [Docker backend setup and verification](Doc
 
 ```sh
 docker build -t cgh-v100 Backend/V100
-docker run --rm --gpus '"device=1"' --name cgh-v100 -p 127.0.0.1:7000:7000 cgh-v100
+docker run --rm --gpus '"device=1,3"' --name cgh-v100 -p 127.0.0.1:7000:7000 cgh-v100
 ```
 
-The image builds from `nvidia/cuda:12.9.2-devel-ubuntu22.04` and runs from `nvidia/cuda:12.9.2-runtime-ubuntu22.04`. On the current host, physical GPU **1** is the **Tesla V100-SXM2-16GB**. When Docker exposes only that GPU, CUDA inside the container sees it as logical **device 0**; future solver code must not hardcode the host index as a CUDA ordinal. The default CUDA solver uses visible device 0. Append `--solver dummy` only for transport-test output.
+The image builds from `nvidia/cuda:12.9.2-devel-ubuntu22.04` and runs from `nvidia/cuda:12.9.2-runtime-ubuntu22.04`. Physical GPUs **1 and 3** are the task's V100s and appear inside the container as logical **devices 0 and 1**. The default CUDA solver uses all visible GPUs, distributing contiguous portions of the row-major pixel array while retaining the complete ordered emitter sum for each pixel. One visible GPU also works. Cancellation or a device failure aborts the complete job. CGHV protocol **1.1** and the CPU reference remain unchanged. Append `--solver dummy` only for transport-test output.
 
 ## Project structure
 

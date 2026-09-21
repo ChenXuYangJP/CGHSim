@@ -9,7 +9,7 @@ src/
     ├── PointFocusSolver.hpp   # Portable solver boundary and dummy declaration
     ├── DummyPointFocus.cpp    # Original transport-test phase ramp
     ├── CudaPointFocus.hpp     # CUDA Solve declaration
-    └── CudaPointFocus.cu      # Reference-equivalent PointFocus on the GPU
+    └── CudaPointFocus.cu      # Reference-equivalent PointFocus across visible GPUs
 
 TCP -> DecodeRequest -> wire::Request -> CudaPointFocus::Solve
     -> wire::Result -> EncodeResult -> TCP
@@ -17,7 +17,7 @@ TCP -> DecodeRequest -> wire::Request -> CudaPointFocus::Solve
 
 The portable [`include/cgh/wire.hpp`](include/cgh/wire.hpp) is shared with UE. The CMake project is `CGHV100Backend` **1.1.0**; the independently versioned wire protocol is **CGHV 1.1**. This protocol adds `PointFocusSuccess` alongside `DummySuccess`; version 1.0 peers reject the new protocol explicitly and must be rebuilt.
 
-## Docker on the task's V100
+## Docker on the task's two V100s
 
 From the repository root:
 
@@ -25,7 +25,7 @@ From the repository root:
 docker build -t cgh-v100 Backend/V100
 docker run \
     --rm \
-    --gpus '"device=1"' \
+    --gpus '"device=1,3"' \
     --name cgh-v100 \
     -p 127.0.0.1:7000:7000 \
     cgh-v100
@@ -33,7 +33,7 @@ docker run \
 
 The build image is `nvidia/cuda:12.9.2-devel-ubuntu22.04`; the runtime image is `nvidia/cuda:12.9.2-runtime-ubuntu22.04`. CMake enables CXX/CUDA, architecture **70**, C++17/CUDA17, and separable compilation. CUDA fast math is disabled and multiply-add contraction is explicitly disabled to preserve the reference's arithmetic. The service runs as UID 10001.
 
-The host needs a compatible NVIDIA driver and NVIDIA Container Toolkit configured for Docker. Physical GPU **1** on this host is the **Tesla V100-SXM2-16GB**. Docker exposes only that GPU, so the solver selects logical **CUDA device 0** inside the container. It must not use host index 1 as a CUDA device ordinal. The host does not need a native CUDA toolkit when building with Docker.
+The host needs a compatible NVIDIA driver and NVIDIA Container Toolkit configured for Docker. Physical GPUs **1 and 3** on this host are the task's V100s. Docker exposes them as logical **CUDA devices 0 and 1** inside the container. The solver discovers and uses all visible CUDA devices; host GPU indices belong in the launch command, not in solver code. Exposing one GPU still works. The host does not need a native CUDA toolkit when building with Docker.
 
 Select the UE actor's **Docker (TCP/CUDA)** backend and use `127.0.0.1:7000`. The normal `FCGHSolverJob -> PollSolver -> SLM` path applies the received result. CPU remains UE's default backend. CUDA failures are reported to UE; the server does not fall back to a CPU calculation or dummy pattern.
 
@@ -45,15 +45,25 @@ Native builds require CMake 3.18+, CUDA `nvcc`, a CUDA-compatible C++17 host com
 
 ```sh
 cmake -S Backend/V100 -B Backend/V100/build \
-    -DCMAKE_BUILD_TYPE=Release -DCGH_ENABLE_CUDA_TESTS=ON
+    -DCMAKE_BUILD_TYPE=Release -DCGH_ENABLE_MULTI_GPU_TESTS=ON
 cmake --build Backend/V100/build --parallel
-CUDA_VISIBLE_DEVICES=1 ctest --test-dir Backend/V100/build --output-on-failure
-CUDA_VISIBLE_DEVICES=1 Backend/V100/build/cgh_v100_server --port 7000
+CUDA_VISIBLE_DEVICES=1,3 ctest --test-dir Backend/V100/build --output-on-failure
+CUDA_VISIBLE_DEVICES=1,3 Backend/V100/build/cgh_v100_server --port 7000
 ```
 
-If needed, pass `-DCMAKE_CUDA_COMPILER=/path/to/cuda-12.9/bin/nvcc`. `CGH_ENABLE_CUDA_TESTS` defaults to OFF so the codec and explicit dummy transport tests can run without a visible GPU; building the executable still requires the CUDA compiler. `-DBUILD_TESTING=OFF` builds only the server.
+If needed, pass `-DCMAKE_CUDA_COMPILER=/path/to/cuda-12.9/bin/nvcc`. `CGH_ENABLE_MULTI_GPU_TESTS` defaults to OFF; enabling it requires at least two visible GPUs and adds both the existing CUDA fixtures and the `cuda_multi_gpu` CTest suite. That suite compares single-GPU and dual-GPU results, checks cancellation while concurrent jobs run, and verifies the no-visible-GPU error. For tests on one GPU, enable `CGH_ENABLE_CUDA_TESTS=ON` instead. Both options default to OFF so the codec and explicit dummy transport tests can run without a visible GPU; building the executable still requires the CUDA compiler. `-DBUILD_TESTING=OFF` builds only the server.
 
 The tests cover the wire format, fragmented and malformed TCP, concurrent jobs, cancellation/disconnect/timeout, numerical point and mesh fixtures, plane-wave compensation, and invalid optical inputs. The UE CUDA tests compare received values directly against the unchanged `CGHPointFocus::Solve`; see [verification and UE test commands](../../Docs/CGH_Docker_Backend.md).
+
+## GPU partitioning
+
+Each job divides the row-major pixel array into balanced, contiguous portions across the visible GPUs, using at most one device per output pixel. Each GPU receives the full emitter list and computes the complete ordered field sum for its pixels. Inputs are replicated, device buffers and streams belong to their device, and completed portions are copied into disjoint positions of one result array. No cross-GPU field reduction changes emitter order or compensation. The wire protocol and UE backend require no changes for multiple GPUs.
+
+The two V100s on this host have six active NVLinks (`NV6` in `nvidia-smi topo -m`). This pixel partition needs no GPU-to-GPU transfer: each device reads its local emitter copy. NVLink peer copies could be evaluated later for distributing large emitter buffers; their benefit depends on measured transfer costs. See [NVIDIA peer-transfer documentation](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/multi-gpu-systems.html).
+
+Full tiles contain 65,536 pixels and launch 512 blocks of 128 threads, giving the V100's 80 SMs multiple blocks to schedule. Emitter batches remain bounded at 256; smaller pixel partitions launch only the blocks needed. The measured tile-size comparison is recorded in the [backend verification guide](../../Docs/CGH_Docker_Backend.md).
+
+Cancellation or a failure on any device aborts the whole job. All workers finish their bounded in-flight operations and release their own device resources before the job completes; a partial pattern is never published. GPU count does not change the optical calculation.
 
 ## Same PointFocus algorithm
 
@@ -64,7 +74,7 @@ The tests cover the wire format, fragmented and malformed TCP, concurrent jobs, 
 - PlaneWave illumination and a phase-only SLM are required. The propagation convention, finite bounds, unit light direction, mesh quaternion, resource revisions, contributing points off the SLM plane, and positive contribution are validated before publication.
 - GPU pixel/emitter batches retain the sum and compensation across launches. Cancellation is checked between bounded operations; the in-flight operation is drained before device buffers are released. A cancelled or failed job returns no partial result.
 
-This is the same numerical algorithm on another device. GPU and CPU math libraries can differ by floating-point rounding; comparisons use circular phase error rather than bitwise equality. GS, FFT propagation, reconstruction imaging, and new optical models are outside this change.
+This is the same numerical algorithm distributed by pixel across devices. GPU and CPU math libraries can differ by floating-point rounding; comparisons use circular phase error rather than bitwise equality. GS, FFT propagation, reconstruction imaging, and new optical models are outside this change.
 
 ## Lifecycle and limits
 

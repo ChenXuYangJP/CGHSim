@@ -218,7 +218,7 @@ bool FCGHCudaReferenceParityTest::RunTest(const FString& Parameters)
 	}
 	bPassed &= CudaCompareCase(*this, *Backend, TEXT("Asymmetric complex field from three points"), CudaMultipleInput());
 	FCGHSolverInput Batched = CudaReferenceInput();
-	CudaSetGrid(Batched, 129, 65); // Cross the 8192-pixel CUDA tile boundary as well as source batches.
+	CudaSetGrid(Batched, 513, 257); // Each half exceeds 65536 pixels; cross per-GPU tiles, a row split, and source batches.
 	const FCGHTargetDescription BatchFirst = Batched.Scene.Targets[0];
 	for (int32 Index = 1; Index < 513; ++Index)
 	{

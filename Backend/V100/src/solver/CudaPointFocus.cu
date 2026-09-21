@@ -15,7 +15,9 @@ namespace cgh::solver::CudaPointFocus {
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr double kCancellationTolerance = 32.0 * std::numeric_limits<double>::epsilon();
-constexpr std::size_t kPixelsPerTile = 8192;
+// A full tile launches 512 blocks at 128 threads, supplying multiple blocks
+// per V100 SM while retaining bounded cancellation between emitter batches.
+constexpr std::size_t kPixelsPerTile = 65536;
 constexpr std::size_t kEmittersPerBatch = 256;
 constexpr std::size_t kUploadEmittersPerBatch = 8192;
 constexpr unsigned kThreadsPerBlock = 128;
@@ -214,10 +216,22 @@ struct DeviceResources {
     ~DeviceResources() { Release(); }
 };
 
-bool WaitForStream(cudaStream_t stream, const std::atomic<bool>& cancelled, std::string& error) {
+struct Cancellation {
+    const std::atomic<bool>& requested;
+    std::atomic<bool> stopped{false};
+
+    bool IsStopped() const {
+        return requested.load(std::memory_order_relaxed) || stopped.load(std::memory_order_acquire);
+    }
+    bool Check(std::string& error) const {
+        return !IsStopped() || wire::Fail(error, "PointFocus job cancelled.");
+    }
+};
+
+bool WaitForStream(cudaStream_t stream, const Cancellation& cancellation, std::string& error) {
     bool cancellation_seen = false;
     for (;;) {
-        cancellation_seen |= cancelled.load(std::memory_order_relaxed);
+        cancellation_seen |= cancellation.IsStopped();
         const auto status = cudaStreamQuery(stream);
         if (status == cudaSuccess) return !cancellation_seen || wire::Fail(error, "PointFocus job cancelled.");
         if (status != cudaErrorNotReady) return CheckCuda(status, "stream completion", error);
@@ -294,6 +308,91 @@ __global__ void AccumulateKernel(const Emitter* emitters, std::size_t emitter_be
     StorePhase(phase, local, phases, error);
 }
 
+// Every worker owns its CUDA context selection and resources. Pixel ranges are
+// disjoint, but kernel offsets always refer to the original full SLM grid.
+bool SolveRange(int ordinal, std::size_t pixel_begin, std::size_t pixel_end,
+                const std::vector<Emitter>& emitters, const Grid& grid,
+                std::vector<double>& phases, const Cancellation& cancellation,
+                std::string& error) {
+    if (!cancellation.Check(error) || !CheckCuda(cudaSetDevice(ordinal), "device selection", error)) return false;
+    DeviceResources device;
+    if (!CheckCuda(cudaStreamCreateWithFlags(&device.stream, cudaStreamNonBlocking), "stream creation", error) ||
+        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.emitters), emitters.size() * sizeof(Emitter)), "emitter allocation", error) ||
+        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.sums), kPixelsPerTile * sizeof(PixelSums)), "sum allocation", error) ||
+        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.phases), kPixelsPerTile * sizeof(double)), "phase allocation", error) ||
+        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.numerical_error), sizeof(int)), "error allocation", error)) return false;
+    if (!cancellation.Check(error)) return false;
+    for (std::size_t begin = 0; begin < emitters.size(); begin += kUploadEmittersPerBatch) {
+        if (!cancellation.Check(error)) return false;
+        const auto count = std::min(kUploadEmittersPerBatch, emitters.size() - begin);
+        if (!CheckCuda(cudaMemcpyAsync(device.emitters + begin, emitters.data() + begin, count * sizeof(Emitter),
+                                      cudaMemcpyHostToDevice, device.stream), "emitter upload", error) ||
+            !WaitForStream(device.stream, cancellation, error)) return false;
+    }
+    for (std::size_t begin = pixel_begin; begin < pixel_end; begin += kPixelsPerTile) {
+        if (!cancellation.Check(error)) return false;
+        const auto count = std::min(kPixelsPerTile, pixel_end - begin);
+        const auto blocks = static_cast<unsigned>((count + kThreadsPerBlock - 1) / kThreadsPerBlock);
+        if (!CheckCuda(cudaMemsetAsync(device.numerical_error, 0, sizeof(int), device.stream), "clear numerical error", error)) return false;
+        if (emitters.size() == 1) {
+            SingleEmitterKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, grid, begin, count,
+                                                                              device.phases, device.numerical_error);
+            if (!CheckCuda(cudaGetLastError(), "single-emitter kernel launch", error) ||
+                !WaitForStream(device.stream, cancellation, error)) return false;
+        } else {
+            if (!CheckCuda(cudaMemsetAsync(device.sums, 0, count * sizeof(PixelSums), device.stream), "clear compensated sums", error)) return false;
+            for (std::size_t first = 0; first < emitters.size(); first += kEmittersPerBatch) {
+                if (!cancellation.Check(error)) return false;
+                const auto emitter_count = std::min(kEmittersPerBatch, emitters.size() - first);
+                const bool final = first + emitter_count == emitters.size();
+                AccumulateKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, first, emitter_count,
+                    grid, begin, count, device.sums, final, device.phases, device.numerical_error);
+                if (!CheckCuda(cudaGetLastError(), "coherent-sum kernel launch", error) ||
+                    !WaitForStream(device.stream, cancellation, error)) return false;
+            }
+        }
+        int numerical_error = 0;
+        if (!CheckCuda(cudaMemcpyAsync(&numerical_error, device.numerical_error, sizeof(int), cudaMemcpyDeviceToHost,
+                                      device.stream), "numerical-error download", error) ||
+            !CheckCuda(cudaMemcpyAsync(phases.data() + begin, device.phases, count * sizeof(double),
+                                      cudaMemcpyDeviceToHost, device.stream), "phase download", error) ||
+            !WaitForStream(device.stream, cancellation, error)) return false;
+        if (numerical_error == 1) return wire::Fail(error, "PointFocus encountered a nonfinite complex field.");
+        if (numerical_error != 0) return wire::Fail(error, "PointFocus encountered a nonfinite propagation phase.");
+    }
+    return cancellation.Check(error) && device.Release(&error);
+}
+
+struct WorkerOutcome {
+    bool succeeded = false;
+    std::string error;
+    std::exception_ptr exception;
+};
+
+// In particular, stop and join already-started workers if starting another host
+// thread throws. No worker may outlive the emitters or the pending result.
+struct WorkerGroup {
+    Cancellation& cancellation;
+    std::vector<std::thread> threads;
+    void Join() {
+        for (auto& thread : threads) if (thread.joinable()) thread.join();
+    }
+    ~WorkerGroup() {
+        cancellation.stopped.store(true, std::memory_order_release);
+        Join();
+    }
+};
+
+std::string ExceptionMessage(const std::exception_ptr& exception) {
+    try {
+        std::rethrow_exception(exception);
+    } catch (const std::exception& failure) {
+        return failure.what();
+    } catch (...) {
+        return "Unknown host exception.";
+    }
+}
+
 bool SolveInternal(const wire::Request& request, wire::Result& result,
                    std::string& error, const std::atomic<bool>& cancelled) {
     const auto start = Clock::now();
@@ -302,22 +401,10 @@ bool SolveInternal(const wire::Request& request, wire::Result& result,
     double zero_threshold = 0;
     if (!GatherEmitters(request, emitters, aperture, zero_threshold, error, cancelled)) return false;
     if (!CheckCancelled(cancelled, error)) return false;
-    // Docker selects the physical GPU. The only visible V100 has logical ordinal 0.
-    if (!CheckCuda(cudaSetDevice(0), "select logical device 0", error)) return false;
-    DeviceResources device;
-    if (!CheckCuda(cudaStreamCreateWithFlags(&device.stream, cudaStreamNonBlocking), "stream creation", error) ||
-        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.emitters), emitters.size() * sizeof(Emitter)), "emitter allocation", error) ||
-        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.sums), kPixelsPerTile * sizeof(PixelSums)), "sum allocation", error) ||
-        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.phases), kPixelsPerTile * sizeof(double)), "phase allocation", error) ||
-        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.numerical_error), sizeof(int)), "error allocation", error)) return false;
-    if (!CheckCancelled(cancelled, error)) return false;
-    for (std::size_t begin = 0; begin < emitters.size(); begin += kUploadEmittersPerBatch) {
-        if (!CheckCancelled(cancelled, error)) return false;
-        const auto count = std::min(kUploadEmittersPerBatch, emitters.size() - begin);
-        if (!CheckCuda(cudaMemcpyAsync(device.emitters + begin, emitters.data() + begin, count * sizeof(Emitter),
-                                      cudaMemcpyHostToDevice, device.stream), "emitter upload", error) ||
-            !WaitForStream(device.stream, cancelled, error)) return false;
-    }
+    int device_count = 0;
+    if (!CheckCuda(cudaGetDeviceCount(&device_count), "device enumeration", error)) return false;
+    if (device_count <= 0) return wire::Fail(error, "PointFocus requires at least one visible CUDA device.");
+
     wire::Result pending;
     pending.status = wire::Status::PointFocusSuccess;
     pending.convention = request.convention;
@@ -329,38 +416,62 @@ bool SolveInternal(const wire::Request& request, wire::Result& result,
                     request.slm.pixel_pitch_x_m, request.slm.pixel_pitch_y_m, aperture.k,
                     request.light.initial_phase_rad, request.light.direction_slm.y,
                     request.light.direction_slm.z, zero_threshold};
-    for (std::size_t begin = 0; begin < total_pixels; begin += kPixelsPerTile) {
-        if (!CheckCancelled(cancelled, error)) return false;
-        const auto count = std::min(kPixelsPerTile, total_pixels - begin);
-        const auto blocks = static_cast<unsigned>((count + kThreadsPerBlock - 1) / kThreadsPerBlock);
-        if (!CheckCuda(cudaMemsetAsync(device.numerical_error, 0, sizeof(int), device.stream), "clear numerical error", error)) return false;
-        if (emitters.size() == 1) {
-            SingleEmitterKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, grid, begin, count,
-                                                                              device.phases, device.numerical_error);
-            if (!CheckCuda(cudaGetLastError(), "single-emitter kernel launch", error) ||
-                !WaitForStream(device.stream, cancelled, error)) return false;
-        } else {
-            if (!CheckCuda(cudaMemsetAsync(device.sums, 0, count * sizeof(PixelSums), device.stream), "clear compensated sums", error)) return false;
-            for (std::size_t first = 0; first < emitters.size(); first += kEmittersPerBatch) {
-                if (!CheckCancelled(cancelled, error)) return false;
-                const auto emitter_count = std::min(kEmittersPerBatch, emitters.size() - first);
-                const bool final = first + emitter_count == emitters.size();
-                AccumulateKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, first, emitter_count,
-                    grid, begin, count, device.sums, final, device.phases, device.numerical_error);
-                if (!CheckCuda(cudaGetLastError(), "coherent-sum kernel launch", error) ||
-                    !WaitForStream(device.stream, cancelled, error)) return false;
-            }
+
+    // Docker selects physical GPUs; CUDA exposes them as logical devices 0..N-1.
+    // Splitting only pixels leaves every source and compensated sum in precisely
+    // the same order as a single-device solve, without any cross-device reduction.
+    const auto worker_count = std::min(total_pixels, static_cast<std::size_t>(device_count));
+    const auto pixels_per_device = total_pixels / worker_count;
+    const auto remainder = total_pixels % worker_count;
+    std::vector<WorkerOutcome> outcomes(worker_count);
+    Cancellation cancellation{cancelled};
+    std::atomic<int> first_failure{-1};
+    WorkerGroup workers{cancellation, {}};
+    workers.threads.reserve(worker_count);
+    std::exception_ptr startup_failure;
+    int startup_device = -1;
+    for (std::size_t index = 0; index < worker_count; ++index) {
+        const auto pixel_begin = index * pixels_per_device + std::min(index, remainder);
+        const auto pixel_end = pixel_begin + pixels_per_device + (index < remainder ? 1 : 0);
+        const auto ordinal = static_cast<int>(index);
+        try {
+            workers.threads.emplace_back([&, index, ordinal, pixel_begin, pixel_end] {
+                auto& outcome = outcomes[index];
+                try {
+                    outcome.succeeded = SolveRange(ordinal, pixel_begin, pixel_end, emitters, grid,
+                                                   pending.phase_radians, cancellation, outcome.error);
+                } catch (...) {
+                    // Do not let an exception escape a worker, even when host
+                    // allocation fails. Format the message after joining.
+                    outcome.exception = std::current_exception();
+                }
+                if (!outcome.succeeded) {
+                    int expected = -1;
+                    first_failure.compare_exchange_strong(expected, ordinal, std::memory_order_relaxed);
+                    cancellation.stopped.store(true, std::memory_order_release);
+                }
+            });
+        } catch (...) {
+            startup_failure = std::current_exception();
+            startup_device = ordinal;
+            cancellation.stopped.store(true, std::memory_order_release);
+            break;
         }
-        int numerical_error = 0;
-        if (!CheckCuda(cudaMemcpyAsync(&numerical_error, device.numerical_error, sizeof(int), cudaMemcpyDeviceToHost,
-                                      device.stream), "numerical-error download", error) ||
-            !CheckCuda(cudaMemcpyAsync(pending.phase_radians.data() + begin, device.phases, count * sizeof(double),
-                                      cudaMemcpyDeviceToHost, device.stream), "phase download", error) ||
-            !WaitForStream(device.stream, cancelled, error)) return false;
-        if (numerical_error == 1) return wire::Fail(error, "PointFocus encountered a nonfinite complex field.");
-        if (numerical_error != 0) return wire::Fail(error, "PointFocus encountered a nonfinite propagation phase.");
     }
-    if (!CheckCancelled(cancelled, error) || !device.Release(&error)) return false;
+    workers.Join();
+    if (!CheckCancelled(cancelled, error)) return false;
+    if (startup_failure) {
+        error = "CUDA device " + std::to_string(startup_device) +
+                " worker startup failed: " + ExceptionMessage(startup_failure);
+        return false;
+    }
+    const int failed_device = first_failure.load(std::memory_order_relaxed);
+    if (failed_device >= 0) {
+        const auto& outcome = outcomes[static_cast<std::size_t>(failed_device)];
+        error = "CUDA device " + std::to_string(failed_device) + ": " +
+                (outcome.exception ? ExceptionMessage(outcome.exception) : outcome.error);
+        return false;
+    }
     pending.compute_seconds = std::chrono::duration<double>(Clock::now() - start).count();
     if (!wire::ValidateResult(pending, error, &cancelled)) return false;
     result = std::move(pending);
@@ -375,7 +486,10 @@ bool Solve(const wire::Request& request, wire::Result& result,
     try {
         return SolveInternal(request, result, error, cancelled);
     } catch (const std::exception& exception) {
-        error = std::string("PointFocus host allocation failed: ") + exception.what();
+        error = std::string("PointFocus host failure: ") + exception.what();
+        return false;
+    } catch (...) {
+        error = "PointFocus failed with an unknown host exception.";
         return false;
     }
 }

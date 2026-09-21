@@ -46,8 +46,8 @@ def receive(sock):
 
 
 class Server:
-    def __init__(self, executable, *options):
-        self.process = subprocess.Popen([executable, "--port", "0", *options], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    def __init__(self, executable, *options, env=None):
+        self.process = subprocess.Popen([executable, "--port", "0", *options], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
         ready, _, _ = select.select([self.process.stdout], [], [], 5)
         assert ready, "Server did not become ready"
         line = self.process.stdout.readline().strip()

@@ -2,7 +2,7 @@
 
 `UCGHDockerSolverBackend` is the second implementation of `UCGHSolverBackend`. It serializes an owned solver snapshot, communicates asynchronously over TCP, and receives an `FCGHSolverResult`. `Backend/V100` contains an independent Linux C++ server, a CMake build, and a Dockerfile. The server and shared wire contract use no Unreal Engine headers or libraries.
 
-**The server now runs the existing PointFocus algorithm on CUDA by default.** The portable solver lives in `src/solver/CudaPointFocus.cu`; `main.cpp` retains TCP framing and dispatch. `--solver dummy` selects the original transport-test ramp. `UCGHCPUSolverBackend` and the numerical implementation in `CGHPointFocus` are unchanged. The CPU implementation remains the numerical reference.
+**The server runs the existing PointFocus algorithm across all visible CUDA GPUs by default.** The portable solver lives in `src/solver/CudaPointFocus.cu`; `main.cpp` retains TCP framing and dispatch. `--solver dummy` selects the original transport-test ramp. `UCGHCPUSolverBackend` and the numerical implementation in `CGHPointFocus` are unchanged. The CPU implementation remains the numerical reference.
 
 ```mermaid
 sequenceDiagram
@@ -30,10 +30,10 @@ The Docker build stage uses `nvidia/cuda:12.9.2-devel-ubuntu22.04`; its runtime 
 
 ```sh
 docker build -t cgh-v100 Backend/V100
-docker run --rm --gpus '"device=1"' --name cgh-v100 -p 127.0.0.1:7000:7000 cgh-v100
+docker run --rm --gpus '"device=1,3"' --name cgh-v100 -p 127.0.0.1:7000:7000 cgh-v100
 ```
 
-This GPU-enabled launch requires a compatible NVIDIA driver and NVIDIA Container Toolkit configured for Docker. The current host's physical GPU **1** is the **Tesla V100-SXM2-16GB**. Exposing only that GPU makes it logical **CUDA device 0** inside the container. Host GPU indices select the hardware made visible to Docker; CUDA device ordinals index the devices visible to the process. CUDA solver code must not hardcode host index 1. The CUDA solver selects this visible device 0. CUDA errors fail the request without a CPU or dummy fallback.
+This GPU-enabled launch requires a compatible NVIDIA driver and NVIDIA Container Toolkit configured for Docker. Physical GPUs **1 and 3** are the task's V100s; they appear as logical **CUDA devices 0 and 1** inside the container. Host indices select the hardware exposed to Docker, while the solver discovers all process-visible devices by CUDA ordinal. A launch exposing one GPU remains supported. CUDA errors fail the request without a CPU or dummy fallback.
 
 Build `CGHSimEditor` normally after adding the C++ files. The runtime module depends on `Sockets` and `Networking`; its private include path points to `Backend/V100/include`. This is an engine-independent protocol dependency, not a dependency on the server executable.
 
@@ -47,6 +47,12 @@ In Unreal:
 6. Cancel during a request to retain the last accepted phase. Change back to CPU and generate to run the reference solver.
 
 The Docker phase-1 limit is 16,777,216 pixels, at most 16,384 per axis, and 1,000,000 aggregate point/mesh samples. These transport limits do not change CPU limits. Each frame is limited to 256 MiB. Large grids require corresponding input, wire, result, and preview buffers; begin with the default 256×256 SLM.
+
+## GPU execution
+
+The CUDA solver divides each job's row-major pixel array into balanced, contiguous portions across all visible GPUs. Each device receives the full emitter list and computes the same complete ordered sum for its assigned pixels, using the existing FP64 PointFocus algorithm. Per-device buffers and streams keep execution independent; result portions are copied into their original positions in one phase array. There is no cross-device field reduction, and normalization, source order, compensation, phase conventions, and pixel coordinates remain those of the CPU reference.
+
+Cancellation or an error on any GPU stops the whole job. Workers drain their bounded in-flight operations and release device resources before completion; no partial result is published. This extends execution across devices without changing CGHV **1.1**, UE transport, the CPU backend, or the reference algorithm.
 
 ## Ownership and lifecycle
 
@@ -81,9 +87,11 @@ Standalone protocol/server tests are registered with CTest. Unreal automation ad
 - `CGHCPUSolverBackend.h/.cpp` and `CGHPointFocus.h/.cpp` have no diff. SHA-256 comparison preserved all 23 pre-existing files under Content, including the user's already modified workbench map.
 - The temporary verification container was stopped after testing. No GPU/CUDA computation, optical parity, graphical preview rendering, cooking or packaged deployment is claimed by this headless transport milestone.
 
-### CUDA/V100 PointFocus verification — 2026-09-21
+### Historical single-GPU CUDA/V100 PointFocus verification — 2026-09-21
 
-- The CUDA 12.9.2 / Ubuntu 22.04 Docker image built successfully for `sm_70`, including separable device linking. The runtime image ran with the exact `--gpus '"device=1"'` selection above. A CUDA API probe confirmed one visible device: logical device 0, Tesla V100-SXM2-16GB, compute capability 7.0.
+These results were recorded before multi-GPU execution was added, with only host GPU 1 exposed. They establish the single-GPU baseline and do not certify the two-GPU implementation.
+
+- The CUDA 12.9.2 / Ubuntu 22.04 Docker image built successfully for `sm_70`, including separable device linking. The runtime image ran with `--gpus '"device=1"'`. A CUDA API probe confirmed one visible device: logical device 0, Tesla V100-SXM2-16GB, compute capability 7.0.
 - Linux Development Editor and Game builds succeeded. `CGHCPUSolverBackend.h/.cpp` and `CGHPointFocus.h/.cpp` have no diff.
 - All **3/3 CTest suites passed** in the CUDA development container on GPU 1: wire codec, TCP integration, and CUDA PointFocus. Independent Python numerical fixtures, invalid optical inputs, in-flight cancellation, disconnect, and recovery all passed. Testing exposed and fixed a completed-client admission race; the single-client fixture now reconnects successfully after cancellation and EOF.
 - All **66 CGH headless UE automation tests passed**, with zero failures, zero not-run tests, and no skip entries. The report records 59 clean successes and 7 successes with directory-watcher warnings from existing asset-save tests deleting their temporary directories. All three CUDA tests passed without warnings.
@@ -92,6 +100,36 @@ Standalone protocol/server tests are registered with CTest. Unreal automation ad
 - The final `cgh-v100:latest` image is available locally. The temporary runtime container was stopped after verification. These headless checks do not establish graphical preview rendering, cooking, packaged deployment, or performance at production scene sizes.
 
 Local evidence (temporary machine-local files): `/tmp/cgh-v100-cuda-build.log`, `/tmp/cgh-v100-cuda-editor-build.log`, `/tmp/cgh-v100-cuda-game-build.log`, `/tmp/cgh-v100-cuda-ctest.log`, `/tmp/cgh-v100-cuda-tests/Testing/Temporary/LastTest.log`, `/tmp/cgh-v100-cuda-automation-final.log`, and `/tmp/cgh-v100-cuda-automation-final/index.json`.
+
+### Dual-GPU verification — 2026-09-21
+
+- The CUDA 12.9.2 / Ubuntu 22.04 image built successfully for `sm_70`. CUDA enumeration in the test container confirmed both Tesla V100-SXM2-16GB devices selected by `--gpus '"device=1,3"'`. During one request, the same server process held allocations and showed GPU activity on both physical GPUs. Host topology reports **NV6**, with six active NVLinks between them; the current independent pixel partitions require no peer transfers.
+- All **4/4 CTest suites passed** with both GPUs visible: wire codec, TCP integration, CUDA PointFocus, and the new `cuda_multi_gpu` suite. The new suite also launches the same executable with a single-device UUID mask and requires **bit-identical** phase arrays. Covered cases include singleton output, uneven partitions splitting a row, posed mesh samples, 131,841 pixels with 513 emitters crossing per-device tile/batch boundaries, and four simultaneous jobs.
+- Multi-GPU cancellation, recovery, and isolation passed. Cancelling one request preserved the complete result of an overlapping 131,841-pixel/8,193-emitter job whose response was still pending when Cancel was sent. A process with no visible GPU returned a protocol Error without a CPU or dummy fallback. The existing cancellation/disconnect and input-validation fixtures also passed on both devices. After the tile-size change, the strengthened overlapping-job fixture was rerun directly against the final binary.
+- The Linux Development Editor build and all **3/3 targeted `CGH.CudaBackend` UE tests passed**, without warnings or skips, against the two-GPU container. The CPU-reference fixture now uses a 513×257 grid with 513 emitters, so both GPU partitions cross a local 65536-pixel tile boundary. Across the tested fixtures the largest circular CUDA/reference error remained **1.4210854715202004e-14 radians**. Actor → backend → TCP → both V100s → result → `PollSolver` → SLM publication passed.
+- The CPU backend, `CGHPointFocus` reference, wire protocol **1.1**, and UE transport implementation have no diff in this change. The single-GPU baseline remains supported. These checks establish correctness and lifecycle behavior; they are not a GPU speedup or NVLink bandwidth benchmark.
+- The updated local `cgh-v100` service uses both GPUs on `127.0.0.1:7000`; its numerical smoke checks passed. The separate verification container was stopped after testing.
+
+Local evidence (temporary machine-local files): `/tmp/cgh-v100-dual-build.log`, `/tmp/cgh-v100-dual-editor-build.log`, `/tmp/cgh-v100-dual-ctest.log`, `/tmp/cgh-v100-dual-multi-final.log`, `/tmp/cgh-v100-dual-tests/Testing/Temporary/LastTest.log`, `/tmp/cgh-v100-dual-automation/index.json`, `/tmp/cgh-v100-dual-device-use.log`, and `/tmp/cgh-v100-dual-service-smoke.log`.
+
+### V100 tile-size measurement — 2026-09-21
+
+A full 8192-pixel tile with 128 threads per block launched only 64 blocks. CUDA reports 80 SMs on each V100. The updated default is **65,536 pixels per tile**, or **512 blocks** for a full tile; smaller partitions launch fewer blocks. Threads per block remain 128 and emitter batches remain 256. Optical math and emitter order are unchanged.
+
+The same two V100 UUIDs ran each temporary build serially, with one context/shape warmup and three round-robin measured runs per configuration. Values below are medians in milliseconds: **server compute time / complete TCP roundtrip including EOF**. These are local synthetic measurements, not production guarantees.
+
+| Grid and source count | 8K pixels | 16K pixels | 32K pixels | 64K pixels |
+| --- | ---: | ---: | ---: | ---: |
+| 256×256, 513 emitters | 15.88 / 20.77 | 9.09 / 20.84 | 6.19 / 10.82 | 6.72 / 20.72 |
+| 512×512, 513 emitters | 57.91 / 83.32 | 31.65 / 63.46 | 19.09 / 42.90 | 13.40 / 42.83 |
+| 512×512, 4097 emitters | 303.72 / 336.59 | 154.12 / 185.12 | 79.77 / 114.79 | 43.27 / 73.61 |
+| 1024×1024, 1 emitter | 83.99 / 165.97 | 51.32 / 125.64 | 33.26 / 106.51 | 25.25 / 95.71 |
+
+64K was the best tested choice overall. The smallest case favored 32K, and its 64K TCP roundtrip was effectively unchanged from 8K. For the 512×512 / 4097-emitter case, 64K improved reported compute time by 7.02× and total TCP time by 4.57×. Larger grids gain both more parallel blocks and fewer launches/host stream-poll waits; this measurement does not isolate occupancy from those other effects. It does not establish 64K as optimal among all possible configurations.
+
+All 48 measured phase payloads matched the 8K baseline byte for byte. Across three 64K cancellation trials on a 1024×1024 / 8193-emitter request, cancellation-to-EOF was 1.98 ms median and 2.38 ms maximum; immediate sole-slot recovery succeeded and no partial result was returned. These latencies describe the samples, not a hard cancellation deadline. NVCC reported unchanged kernel register usage (54 registers/thread for accumulation, 26 for a single emitter) and no spills.
+
+Temporary local reproduction/evidence: `/tmp/cgh-v100-tile-bench/benchmark.py`, `results.json`, `run.log`, `build.log`, and `REPORT.md` in that directory.
 
 ### Reproduce transport checks
 

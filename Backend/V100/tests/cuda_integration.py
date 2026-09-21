@@ -146,22 +146,29 @@ def oracle(scene):
     return phases
 
 
+def receive_result(sock, identity, scene, label):
+    """Validate one computed result and connection closure, without an oracle."""
+    kind, reply_identity, payload = receive(sock)
+    assert kind == 2, f"{label}: expected CUDA result, received kind {kind}: {payload!r}"
+    assert reply_identity == identity, f"{label}: wrong request identity"
+    assert len(payload) >= 32, f"{label}: truncated result metadata"
+    status, convention, width, height, seconds, count = struct.unpack("!IIIIdQ", payload[:32])
+    assert (status, convention, width, height, count) == (2, 1, scene.width, scene.height, scene.width * scene.height), (
+        f"{label}: CUDA PointFocusSuccess metadata expected, got {status, convention, width, height, count}")
+    assert math.isfinite(seconds) and seconds >= 0.0
+    assert len(payload) == 32 + 8 * count
+    phases = struct.unpack(f"!{count}d", payload[32:])
+    assert all(math.isfinite(value) and 0.0 <= value < TAU for value in phases)
+    assert sock.recv(1) == b"", "Server must close after one complete result"
+    return phases
+
+
 def solve(server, scene, label):
     identity = next(IDENTITIES)
     with server.connect() as sock:
         sock.sendall(frame(1, identity, encode(scene)))
-        kind, reply_identity, payload = receive(sock)
-        assert kind == 2, f"{label}: expected CUDA result, received kind {kind}: {payload!r}"
-        assert reply_identity == identity, f"{label}: wrong request identity"
-        assert len(payload) >= 32, f"{label}: truncated result metadata"
-        status, convention, width, height, seconds, count = struct.unpack("!IIIIdQ", payload[:32])
-        assert (status, convention, width, height, count) == (2, 1, scene.width, scene.height, scene.width * scene.height), (
-            f"{label}: CUDA PointFocusSuccess metadata expected, got {status, convention, width, height, count}")
-        assert math.isfinite(seconds) and seconds >= 0.0
-        assert len(payload) == 32 + 8 * count
-        phases = struct.unpack(f"!{count}d", payload[32:])
-        assert all(math.isfinite(value) and 0.0 <= value < TAU for value in phases)
-        assert sock.recv(1) == b"", "Server must close after one complete result"
+        phases = receive_result(sock, identity, scene, label)
+    count = len(phases)
     expected = oracle(scene)
     error = max(abs(math.remainder(actual - wanted, TAU)) for actual, wanted in zip(phases, expected))
     assert error <= PHASE_TOLERANCE, f"{label}: maximum wrapped phase error {error:.12g} rad"
