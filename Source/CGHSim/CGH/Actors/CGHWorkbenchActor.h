@@ -52,7 +52,7 @@ public:
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Solver")
 	FString SolverStatusMessage = TEXT("No solver assigned.");
 
-	/** Bind an unassigned solver to this workbench and request a fresh point-focus pattern. */
+	/** Bind an unassigned solver to this workbench and request a fresh point/mesh complex-field phase pattern. */
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
 	void SolvePhasePattern();
 

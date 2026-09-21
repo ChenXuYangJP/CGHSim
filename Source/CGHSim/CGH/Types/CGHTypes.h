@@ -68,6 +68,7 @@ struct CGHSIM_API FCGHTargetParameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target")
 	ECGHTargetType TargetType = ECGHTargetType::Point;
 
+	/** Field amplitude of a point, or of each sampled mesh point (not total mesh power). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target", meta = (ClampMin = "0.0"))
 	double Amplitude = 1.0;
 
@@ -269,7 +270,10 @@ struct CGHSIM_API FCGHMeshGeometryResource
 	TArray<FVector2f> UVs;
 };
 
-/** One surface sample in the same scaled, rigid local frame as the mesh resource. */
+/**
+ * One surface sample in the same scaled, rigid local frame as the mesh resource.
+ * Amplitude and Phase already include the target parameters; solvers must not apply them twice.
+ */
 USTRUCT(BlueprintType)
 struct CGHSIM_API FCGHObjectPoint
 {
@@ -291,7 +295,10 @@ struct CGHSIM_API FCGHObjectPoint
 	FVector2f UV = FVector2f::ZeroVector;
 };
 
-/** Point cloud in meters in the target actor's rigid local axes. */
+/**
+ * Point cloud in meters in the target actor's rigid local axes.
+ * Solvers snapshot these points by ResourceId/Revision; publish a new revision after any data edit.
+ */
 USTRUCT(BlueprintType)
 struct CGHSIM_API FCGHPointCloudResource
 {

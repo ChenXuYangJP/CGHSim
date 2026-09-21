@@ -6,17 +6,21 @@
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHTargetActor.h"
 #include "CGH/Actors/CGHWorkbenchActor.h"
+#include "Components/StaticMeshComponent.h"
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/AutomationTest.h"
 #include "Tests/AutomationCommon.h"
 
+#include <complex>
 #include <limits>
 
 #if WITH_EDITOR
 #include "CGH/Components/CGHSLMPreviewComponent.h"
 #include "Engine/Texture2D.h"
+#include "StaticMeshCompiler.h"
 #endif
 
 namespace
@@ -103,6 +107,11 @@ namespace
 	/** Verify propagation independently using complex phase, including row direction and SI conversion. */
 	bool CheckCGHPointFocus(FAutomationTestBase& Test, const FCGHSolverTestScene& Scene)
 	{
+		if (!Test.TestTrue(TEXT("Point-focus solve reaches Ready"), Scene.Solver->JobState == ECGHSolverJobState::Ready))
+		{
+			Test.AddError(Scene.Solver->StatusMessage);
+			return false;
+		}
 		if (!Test.TestTrue(TEXT("Solver publishes a valid SLM pattern"), Scene.SLM->HasValidPhasePattern()))
 		{
 			return false;
@@ -144,6 +153,115 @@ namespace
 			static_cast<double>(Pattern.PhaseRad.Num()), 1.0e-10);
 		return true;
 	}
+
+	ACGHTargetActor* AddCGHMeshTarget(FAutomationTestBase& Test, FCGHSolverTestScene& Scene)
+	{
+		ACGHTargetActor* Mesh = Scene.GetTestWorld()->SpawnActor<ACGHTargetActor>();
+		UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+		if (!Test.TestNotNull(TEXT("Mesh actor is available"), Mesh)
+			|| !Test.TestNotNull(TEXT("Cube sampling fixture is available"), Cube))
+		{
+			return nullptr;
+		}
+#if WITH_EDITOR
+		UStaticMesh* Meshes[] = {Cube};
+		FStaticMeshCompilingManager::Get().FinishCompilation(Meshes);
+#endif
+		Mesh->SLM = Scene.SLM;
+		Mesh->SetActorTransform(FTransform(FRotator(-13.0, 27.0, 11.0),
+			Scene.SLM->GetActorTransform().TransformPositionNoScale(FVector(65.0, -1.1, 1.9)),
+			FVector(0.021, 0.013, 0.017)));
+		Mesh->GeometryMesh->SetStaticMesh(Cube);
+		Mesh->GeometryMesh->SetRelativeTransform(FTransform(FRotator(7.0, -19.0, 5.0),
+			FVector(8.0, -4.0, 6.0), FVector(0.7, 1.2, 0.8)));
+		Mesh->Parameters.TargetType = ECGHTargetType::Mesh;
+		Mesh->Parameters.Amplitude = 0.31;
+		Mesh->Parameters.InitialPhaseRad = -0.47;
+		Mesh->SliceCount = 2;
+		Mesh->PointSpacingMm = 6.5;
+		Mesh->MaxPointCount = 2000;
+		Mesh->UpdateTargetResources();
+		if (!Test.TestTrue(TEXT("Transformed mesh samples a valid cloud"), Mesh->bResourcesValid)
+			|| !Test.TestTrue(TEXT("Mesh supplies several contributions"), Mesh->PointCloudResource.Points.Num() > 1))
+		{
+			Test.AddError(Mesh->ResourceError);
+			return nullptr;
+		}
+		Scene.Workbench->Targets.Add(Mesh);
+		return Mesh;
+	}
+
+	/** Independent std::complex oracle uses actual actors/clouds and world-to-SLM transforms. */
+	bool CheckCGHComplexSuperposition(FAutomationTestBase& Test, const FCGHSolverTestScene& Scene)
+	{
+		if (!Test.TestTrue(TEXT("Complex-superposition solve reaches Ready"), Scene.Solver->JobState == ECGHSolverJobState::Ready))
+		{
+			Test.AddError(Scene.Solver->StatusMessage);
+			return false;
+		}
+		if (!Test.TestTrue(TEXT("Complex superposition publishes a complete pattern"), Scene.SLM->HasValidPhasePattern()))
+		{
+			return false;
+		}
+		struct FContribution
+		{
+			FVector PositionM;
+			double Amplitude;
+			double Phase;
+		};
+		TArray<FContribution> Contributions;
+		const FTransform SLMTransform = Scene.SLM->GetActorTransform();
+		for (const ACGHTargetActor* Target : Scene.Workbench->Targets)
+		{
+			if (Target->Parameters.TargetType == ECGHTargetType::Point)
+			{
+				Contributions.Add({SLMTransform.InverseTransformPositionNoScale(Target->GetActorLocation()) * 0.01,
+					Target->Parameters.Amplitude, Target->Parameters.InitialPhaseRad});
+			}
+			else
+			{
+				for (const FCGHObjectPoint& Sample : Target->PointCloudResource.Points)
+				{
+					// Resources already contain actor/component scale and component offsets.
+					const FVector WorldCm = Target->GetActorTransform().TransformPositionNoScale(Sample.PositionLocalM * 100.0);
+					Contributions.Add({SLMTransform.InverseTransformPositionNoScale(WorldCm) * 0.01,
+						Sample.Amplitude, Sample.Phase});
+				}
+			}
+		}
+		const double K = 2.0 * UE_DOUBLE_PI / (Scene.Light->Parameters.WavelengthNm * 1.0e-9);
+		const FVector Direction = SLMTransform.InverseTransformVectorNoScale(Scene.Light->GetPropagationDirection()).GetSafeNormal();
+		const FCGHSLMPhasePattern& Pattern = Scene.SLM->GetPhasePattern();
+		double LargestUnitFieldError = 0.0;
+		for (int32 Row = 0; Row < Pattern.ResolutionY; ++Row)
+		{
+			for (int32 Column = 0; Column < Pattern.ResolutionX; ++Column)
+			{
+				const FVector PixelM(0.0,
+					(Column - (Pattern.ResolutionX - 1) / 2.0) * Scene.SLM->Parameters.PixelPitchXUm * 1.0e-6,
+					((Pattern.ResolutionY - 1) / 2.0 - Row) * Scene.SLM->Parameters.PixelPitchYUm * 1.0e-6);
+				std::complex<double> Field(0.0, 0.0);
+				for (const FContribution& Contribution : Contributions)
+				{
+					const double Phase = Contribution.Phase - K * FVector::Distance(Contribution.PositionM, PixelM);
+					Field += std::polar(Contribution.Amplitude, Phase);
+				}
+				if (!Test.TestTrue(TEXT("Fixture avoids an undefined zero-field phase"), std::abs(Field) > 1.0e-6))
+				{
+					return false;
+				}
+				const double IncidentPhase = Scene.Light->Parameters.InitialPhaseRad + K * FVector::DotProduct(Direction, PixelM);
+				const double Phase = Pattern.PhaseRad[Row * Pattern.ResolutionX + Column];
+				Test.TestTrue(TEXT("Complex result remains finite and wrapped"),
+					FMath::IsFinite(Phase) && Phase >= 0.0 && Phase < 2.0 * UE_DOUBLE_PI);
+				LargestUnitFieldError = FMath::Max(LargestUnitFieldError,
+					std::abs(std::polar(1.0, Phase + IncidentPhase) - Field / std::abs(Field)));
+			}
+		}
+		return Test.TestTrue(FString::Printf(TEXT("Phase matches normalized weighted complex sum after incident-wave compensation (max error %.3g)"),
+			LargestUnitFieldError), LargestUnitFieldError < 1.0e-7);
+	}
+
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverPublicationTest,
@@ -386,12 +504,12 @@ bool FCGHSolverInputValidationTest::RunTest(const FString& Parameters)
 	CheckRejected(TEXT("Point-source illumination is unsupported by this plane-wave solver"));
 	Scene.Light->Parameters.SourceType = ECGHSourceType::PlaneWave;
 	Scene.Workbench->Targets.Reset();
-	CheckRejected(TEXT("Missing point target is rejected"));
+	CheckRejected(TEXT("Missing target list is rejected"));
 	Scene.Workbench->Targets = {Scene.Target, Scene.Target};
-	CheckRejected(TEXT("Multiple target entries are rejected"));
+	CheckRejected(TEXT("Duplicate actor entries are rejected to prevent accidental double counting"));
 	Scene.Workbench->Targets = {Scene.Target};
 	Scene.Target->Parameters.TargetType = ECGHTargetType::Mesh;
-	CheckRejected(TEXT("Mesh targets are rejected"));
+	CheckRejected(TEXT("A mesh target without sampled geometry is rejected"));
 	Scene.Target->Parameters.TargetType = ECGHTargetType::Point;
 	Scene.Workbench->ReconstructionLight = nullptr;
 	CheckRejected(TEXT("Missing wavelength source is rejected"));
@@ -450,13 +568,22 @@ bool FCGHSolverAutoRefreshTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Unchanged auto inputs do not launch repeated jobs"), Scene.Solver->JobId, InitialJob);
 	TestEqual(TEXT("Unchanged auto inputs do not republish phase"), Scene.SLM->GetPhasePatternRevision(), InitialRevision);
 
-	Scene.Target->Parameters.Amplitude = 0.25;
 	Scene.Target->SetActorRotation(FRotator(12.0, -30.0, 4.0));
 	Scene.Light->Parameters.Amplitude = 0.5;
 	Scene.Light->Parameters.PolarizationAngleDeg = 65.0;
 	Scene.Light->AddActorWorldOffset(FVector(23.0, -17.0, 5.0));
 	Scene.TickTestWorld();
-	TestEqual(TEXT("Finite amplitude/polarization, point orientation and plane-wave position do not trigger a point-focus job"), Scene.Solver->JobId, InitialJob);
+	TestEqual(TEXT("Finite light amplitude/polarization, point orientation and plane-wave position do not trigger a point-focus job"), Scene.Solver->JobId, InitialJob);
+
+	Scene.Target->Parameters.Amplitude = 0.25;
+	Scene.TickTestWorld();
+	if (!WaitForCGHSolver(*this, *Scene.Solver, &Scene) || !CheckCGHPointFocus(*this, Scene))
+	{
+		return false;
+	}
+	TestTrue(TEXT("Target amplitude is consumed by complex superposition and launches a job"), Scene.Solver->JobId > InitialJob);
+	TestEqual(TEXT("A positive amplitude change on a single point keeps its phase-only result"),
+		Scene.SLM->GetPhasePatternRevision(), InitialRevision);
 
 	Scene.Light->Parameters.InitialPhaseRad = 1.25;
 	Scene.TickTestWorld();
@@ -655,6 +782,271 @@ bool FCGHSolverDestroyedActorTest::RunTest(const FString& Parameters)
 	// Exercise task completion after teardown without accessing destroyed UObjects.
 	FPlatformProcess::Sleep(0.005f);
 	Scene.TickTestWorld();
+	Scene.ForwardErrorMessages(this);
+	return true;
+}
+
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverComplexTargetsTest,
+	"CGH.SolverActor.MixedPointAndMeshTargetsUseComplexSuperposition",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHSolverComplexTargetsTest::RunTest(const FString& Parameters)
+{
+	FCGHSolverTestScene Scene;
+	if (!Scene.Initialize(*this))
+	{
+		return false;
+	}
+	Scene.Target->Parameters.Amplitude = 2.2;
+	ACGHTargetActor* OtherPoint = Scene.GetTestWorld()->SpawnActor<ACGHTargetActor>();
+	if (!TestNotNull(TEXT("A second mathematical point can be spawned"), OtherPoint))
+	{
+		return false;
+	}
+	OtherPoint->SetActorLocation(Scene.SLM->GetActorTransform().TransformPositionNoScale(FVector(43.0, -1.3, 0.9)));
+	OtherPoint->Parameters.Amplitude = 0.65;
+	OtherPoint->Parameters.InitialPhaseRad = 1.17;
+	Scene.Workbench->Targets.Add(OtherPoint);
+	Scene.Light->SetActorRotation(Scene.SLM->GetActorTransform().TransformVectorNoScale(FVector(0.8, 0.36, -0.48)).Rotation());
+	Scene.Light->Parameters.InitialPhaseRad = -0.29;
+	TestTrue(TEXT("Two distinct point targets are accepted"), Scene.Solver->StartSolve());
+	if (!WaitForCGHSolver(*this, *Scene.Solver) || !CheckCGHComplexSuperposition(*this, Scene))
+	{
+		return false;
+	}
+	ACGHTargetActor* Mesh = AddCGHMeshTarget(*this, Scene);
+	if (!Mesh)
+	{
+		return false;
+	}
+	TestTrue(TEXT("Point and sampled mesh targets can be solved together"), Scene.Solver->StartSolve());
+	if (!WaitForCGHSolver(*this, *Scene.Solver) || !CheckCGHComplexSuperposition(*this, Scene))
+	{
+		return false;
+	}
+	TestTrue(TEXT("Mixed-target result reaches ready"), Scene.Solver->JobState == ECGHSolverJobState::Ready);
+	const uint64 BeforeCancelRevision = Scene.SLM->GetPhasePatternRevision();
+	const TArray<double> BeforeCancelPhases = Scene.SLM->GetPhasePattern().PhaseRad;
+	TestTrue(TEXT("Another mixed-target job starts"), Scene.Solver->StartSolve());
+	Scene.Solver->CancelSolve();
+	Scene.Solver->PollSolver();
+	TestEqual(TEXT("Cancelling a mesh solve preserves the published revision"), Scene.SLM->GetPhasePatternRevision(), BeforeCancelRevision);
+	TestTrue(TEXT("Cancelling a mesh solve preserves all published samples"), Scene.SLM->GetPhasePattern().PhaseRad == BeforeCancelPhases);
+
+	TestTrue(TEXT("A mixed-target request restarts after cancellation"), Scene.Solver->StartSolve());
+	Mesh->Parameters.InitialPhaseRad += 0.61;
+	TestTrue(TEXT("Changed cloud input replaces running work"), Scene.Solver->StartSolve());
+	OtherPoint->Parameters.Amplitude += 0.27;
+	Mesh->Parameters.InitialPhaseRad -= 1.39;
+	TestTrue(TEXT("The latest complete mixed-target snapshot replaces pending work"), Scene.Solver->StartSolve());
+	if (!WaitForCGHSolver(*this, *Scene.Solver) || !CheckCGHComplexSuperposition(*this, Scene))
+	{
+		return false;
+	}
+	TestEqual(TEXT("Only the latest mixed-target request publishes"), Scene.SLM->GetPhasePatternRevision(), BeforeCancelRevision + 1);
+	Scene.Workbench->Targets = {Mesh};
+	TestTrue(TEXT("A sampled mesh can be the only target"), Scene.Solver->StartSolve());
+	return WaitForCGHSolver(*this, *Scene.Solver) && CheckCGHComplexSuperposition(*this, Scene);
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverStaleMeshInputsTest,
+	"CGH.SolverActor.AnyTargetOrCloudChangeInvalidatesInflightResults",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHSolverStaleMeshInputsTest::RunTest(const FString& Parameters)
+{
+	for (int32 Mutation = 0; Mutation < 13; ++Mutation)
+	{
+		FCGHSolverTestScene Scene;
+		if (!Scene.Initialize(*this) || !Scene.PublishSentinel(*this))
+		{
+			return false;
+		}
+		ACGHTargetActor* Mesh = AddCGHMeshTarget(*this, Scene);
+		if (!Mesh)
+		{
+			return false;
+		}
+		const uint64 BeforeRevision = Scene.SLM->GetPhasePatternRevision();
+		TestTrue(TEXT("Mixed-target input is captured before mutation"), Scene.Solver->StartSolve());
+		// Polling is deliberately delayed until after edits, independent of worker completion timing.
+		switch (Mutation)
+		{
+		case 0: Mesh->Parameters.InitialPhaseRad += 0.4; break;
+		case 1: Mesh->Parameters.Amplitude += 0.2; break;
+		case 2: Mesh->AddActorWorldOffset(FVector(0.0, 0.3, 0.0)); break;
+		case 3: Mesh->AddActorWorldRotation(FRotator(1.0, 3.0, -2.0)); break;
+		case 4: Mesh->SetActorScale3D(FVector(0.023, 0.013, 0.017)); break;
+		case 5: Mesh->GeometryMesh->SetRelativeScale3D(FVector(0.8, 1.2, 0.8)); break;
+		case 6: Mesh->SliceCount += 1; break;
+		case 7: Mesh->RebuildTargetResources(); break;
+		case 8: Mesh->Destroy(); break;
+		case 9: Scene.Workbench->Targets.Swap(0, 1); break;
+		case 10: Scene.Workbench->Targets.RemoveAt(1); break;
+		case 11:
+		{
+			ACGHTargetActor* Replacement = AddCGHMeshTarget(*this, Scene);
+			if (!Replacement)
+			{
+				return false;
+			}
+			Scene.Workbench->Targets = {Scene.Target, Replacement};
+			break;
+		}
+		case 12: Mesh->SLM = Scene.GetTestWorld()->SpawnActor<ACGHSLMActor>(); break;
+		}
+		if (!WaitForCGHSolver(*this, *Scene.Solver))
+		{
+			return false;
+		}
+		TestFalse(FString::Printf(TEXT("Obsolete mesh/list input %d cannot become ready"), Mutation),
+			Scene.Solver->JobState == ECGHSolverJobState::Ready);
+		TestEqual(TEXT("An obsolete second target cannot overwrite the SLM"), Scene.SLM->GetPhasePatternRevision(), BeforeRevision);
+		TestEqual(TEXT("Discarding a stale cloud preserves the previous samples"), Scene.SLM->GetPhasePattern().PhaseRad[0], 0.125);
+		TestFalse(TEXT("Discarding stale mixed-target data reports a diagnostic"), Scene.Solver->StatusMessage.IsEmpty());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverMeshValidationTest,
+	"CGH.SolverActor.InvalidMeshCloudPreservesPublishedPhase",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHSolverMeshValidationTest::RunTest(const FString& Parameters)
+{
+	for (int32 InvalidCase = 0; InvalidCase < 5; ++InvalidCase)
+	{
+		FCGHSolverTestScene Scene;
+		if (!Scene.Initialize(*this) || !Scene.PublishSentinel(*this))
+		{
+			return false;
+		}
+		ACGHTargetActor* Mesh = AddCGHMeshTarget(*this, Scene);
+		if (!Mesh)
+		{
+			return false;
+		}
+		const uint64 BeforeRevision = Scene.SLM->GetPhasePatternRevision();
+		switch (InvalidCase)
+		{
+		case 0: Mesh->GeometryMesh->SetStaticMesh(nullptr); break;
+		case 1: Mesh->MaxPointCount = 1; break;
+		case 2:
+		case 3:
+			// Simulate an invalid externally supplied generation, with consistent version metadata.
+			++Mesh->TargetDescription.Revision;
+			Mesh->TargetDescription.GeometryRevision = Mesh->TargetDescription.Revision;
+			Mesh->MeshGeometryResource.Revision = Mesh->TargetDescription.Revision;
+			Mesh->PointCloudResource.Revision = Mesh->TargetDescription.Revision;
+			if (InvalidCase == 2)
+			{
+				Mesh->PointCloudResource.Points.Reset();
+				Mesh->PointCount = 0;
+			}
+			else
+			{
+				Mesh->PointCloudResource.Points[0].Amplitude = std::numeric_limits<double>::quiet_NaN();
+			}
+			break;
+		case 4: ++Mesh->PointCloudResource.Revision; break;
+		}
+		Scene.Solver->StartSolve();
+		if (!WaitForCGHSolver(*this, *Scene.Solver))
+		{
+			return false;
+		}
+		TestTrue(FString::Printf(TEXT("Invalid mesh generation %d fails the entire request"), InvalidCase),
+			Scene.Solver->JobState == ECGHSolverJobState::Failed);
+		TestFalse(TEXT("Invalid cloud has a useful failure status"), Scene.Solver->StatusMessage.IsEmpty());
+		TestEqual(TEXT("Invalid clouds preserve the previous phase buffer"), Scene.SLM->GetPhasePatternRevision(), BeforeRevision);
+		TestEqual(TEXT("Invalid clouds preserve the previous phase samples"), Scene.SLM->GetPhasePattern().PhaseRad[0], 0.125);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverMeshAutoRefreshTest,
+	"CGH.SolverActor.AutoSolveTracksAllTargetsAndMeshResources",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHSolverMeshAutoRefreshTest::RunTest(const FString& Parameters)
+{
+	FCGHSolverTestScene Scene;
+	if (!Scene.Initialize(*this))
+	{
+		return false;
+	}
+	ACGHTargetActor* Mesh = AddCGHMeshTarget(*this, Scene);
+	if (!Mesh || !Scene.BeginPlayInTestWorld())
+	{
+		Scene.ForwardErrorMessages(this);
+		return false;
+	}
+	Scene.Solver->bAutoSolve = true;
+	Scene.TickTestWorld();
+	if (!WaitForCGHSolver(*this, *Scene.Solver, &Scene) || !CheckCGHComplexSuperposition(*this, Scene))
+	{
+		return false;
+	}
+	const int64 InitialJob = Scene.Solver->JobId;
+	Scene.Target->SetActorRotation(FRotator(11.0, -7.0, 3.0));
+	Scene.Target->MarkerRadiusCm += 1.0;
+	Mesh->bShowPointCloud = true;
+	Mesh->DebugPointSize += 1.0f;
+	Scene.Light->Parameters.Amplitude = 0.2;
+	Scene.Light->Parameters.PolarizationAngleDeg = 47.0;
+	Scene.Light->AddActorWorldOffset(FVector(7.0, 11.0, -5.0));
+	for (int32 Tick = 0; Tick < 5; ++Tick)
+	{
+		Scene.TickTestWorld();
+	}
+	TestEqual(TEXT("Point rotation, display edits and unused light fields do not restart mixed-target solving"), Scene.Solver->JobId, InitialJob);
+
+	for (int32 Mutation = 0; Mutation < 8; ++Mutation)
+	{
+		const int64 BeforeJob = Scene.Solver->JobId;
+		switch (Mutation)
+		{
+		case 0: Scene.Target->Parameters.Amplitude = 0.45; break;
+		case 1: Mesh->Parameters.Amplitude = 0.57; break;
+		case 2: Mesh->Parameters.InitialPhaseRad += 0.53; break;
+		case 3: Mesh->AddActorWorldRotation(FRotator(2.0, 1.0, -3.0)); break;
+		case 4: Mesh->GeometryMesh->SetRelativeScale3D(FVector(0.9, 1.2, 0.8)); break;
+		case 5: Mesh->SliceCount += 1; break;
+		case 6: Mesh->RebuildTargetResources(); break;
+		case 7: Scene.Workbench->Targets.Swap(0, 1); break;
+		}
+		Scene.TickTestWorld();
+		if (!WaitForCGHSolver(*this, *Scene.Solver, &Scene) || !CheckCGHComplexSuperposition(*this, Scene))
+		{
+			return false;
+		}
+		TestTrue(FString::Printf(TEXT("Consumed mixed-target edit %d queues a new request"), Mutation), Scene.Solver->JobId > BeforeJob);
+		const int64 SettledJob = Scene.Solver->JobId;
+		for (int32 Tick = 0; Tick < 4; ++Tick)
+		{
+			Scene.TickTestWorld();
+		}
+		TestEqual(TEXT("An unchanged cloud does not trigger repeated copies/jobs"), Scene.Solver->JobId, SettledJob);
+	}
+	const uint64 BeforeInvalidRevision = Scene.SLM->GetPhasePatternRevision();
+	Mesh->GeometryMesh->SetStaticMesh(nullptr);
+	Scene.TickTestWorld();
+	TestTrue(TEXT("Unavailable mesh geometry makes automatic solving fail"), Scene.Solver->JobState == ECGHSolverJobState::Failed);
+	const int64 FailedJob = Scene.Solver->JobId;
+	for (int32 Tick = 0; Tick < 4; ++Tick)
+	{
+		Scene.TickTestWorld();
+	}
+	TestEqual(TEXT("Unchanged invalid mesh does not produce a failed-request loop"), Scene.Solver->JobId, FailedJob);
+	TestEqual(TEXT("Unavailable mesh leaves the last valid phase visible"), Scene.SLM->GetPhasePatternRevision(), BeforeInvalidRevision);
+	Mesh->GeometryMesh->SetStaticMesh(LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
+	Scene.TickTestWorld();
+	if (!WaitForCGHSolver(*this, *Scene.Solver, &Scene) || !CheckCGHComplexSuperposition(*this, Scene))
+	{
+		return false;
+	}
+	TestTrue(TEXT("Restoring the mesh resumes automatic solving"), Scene.Solver->JobId > FailedJob);
 	Scene.ForwardErrorMessages(this);
 	return true;
 }

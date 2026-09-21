@@ -397,7 +397,7 @@ bool ACGHWorkbenchActor::ValidateScene()
 	if (bSceneValid)
 	{
 		ValidationMessages.Add(FString::Printf(
-			TEXT("Scene configuration valid (%d target(s)). Optical solver remains unimplemented."),
+			TEXT("Scene configuration valid (%d target(s))."),
 			UniqueTargets.Num()));
 		UE_LOG(LogCGHWorkbench, Display, TEXT("%s"), *ValidationMessages[0]);
 	}

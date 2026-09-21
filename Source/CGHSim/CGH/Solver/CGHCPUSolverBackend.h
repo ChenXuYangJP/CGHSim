@@ -3,7 +3,10 @@
 #include "CGH/Solver/CGHSolverBackend.h"
 #include "CGHCPUSolverBackend.generated.h"
 
-/** Reference CPU backend. The queued computation captures only its plain-data job mailbox. */
+/**
+ * Reference CPU complex-field superposition for Point targets and sampled Mesh targets.
+ * The queued computation owns its scene/cloud snapshots and never accesses actor/UObject data.
+ */
 UCLASS()
 class CGHSIM_API UCGHCPUSolverBackend : public UCGHSolverBackend
 {

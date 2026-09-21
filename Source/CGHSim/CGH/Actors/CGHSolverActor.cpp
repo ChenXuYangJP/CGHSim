@@ -19,6 +19,7 @@ ACGHSolverActor::ACGHSolverActor()
 
 bool ACGHSolverActor::CaptureSubmission(FCGHSolverSubmission& Out, FString& Error)
 {
+	Out = FCGHSolverSubmission();
 	const auto Available = [this](const AActor* Actor)
 	{
 		return IsValid(Actor) && !Actor->IsActorBeingDestroyed() && Actor->GetWorld() == GetWorld();
@@ -33,29 +34,73 @@ bool ACGHSolverActor::CaptureSubmission(FCGHSolverSubmission& Out, FString& Erro
 		Error = TEXT("PointFocus requires a valid SLM and plane-wave light in the same world.");
 		return false;
 	}
-	if (Workbench->Targets.Num() != 1 || !Available(Workbench->Targets[0]))
+	if (Workbench->Targets.IsEmpty() || Workbench->Targets.Num() > CGHPointFocus::MaximumEmitterCount)
 	{
-		Error = TEXT("PointFocus requires exactly one valid point target actor in the same world.");
-		return false;
-	}
-	ACGHTargetActor* Target = Workbench->Targets[0];
-	if (Target->Parameters.TargetType != ECGHTargetType::Point)
-	{
-		Error = TEXT("PointFocus supports a single Point target only; mesh targets are not supported.");
+		Error = TEXT("Assign at least one target, within the 1,000,000 aggregate source-sample limit.");
 		return false;
 	}
 	if (Workbench->SLM->GetActorTransform().ContainsNaN()
-		|| Target->GetActorTransform().ContainsNaN()
 		|| !Workbench->SLM->GetActorScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER))
 	{
-		Error = TEXT("SLM/target transforms must be finite, and the SLM actor scale must be (1, 1, 1).");
+		Error = TEXT("The SLM transform must be finite and its actor scale must be (1, 1, 1).");
 		return false;
 	}
-
-	Workbench->UpdateSceneDescription();
-	if (Target->GetReferenceSLM() != Workbench->SLM || !Target->bResourcesValid)
+	TSet<ACGHTargetActor*> UniqueTargets;
+	for (int32 Index = 0; Index < Workbench->Targets.Num(); ++Index)
 	{
-		Error = TEXT("The target must have valid resources in this workbench's SLM frame.");
+		ACGHTargetActor* Target = Workbench->Targets[Index];
+		if (!Available(Target) || Target->GetActorTransform().ContainsNaN())
+		{
+			Error = FString::Printf(TEXT("Target[%d] must be a valid actor in this world with a finite transform."), Index);
+			return false;
+		}
+		if (UniqueTargets.Contains(Target))
+		{
+			Error = FString::Printf(TEXT("Target[%d] duplicates another target actor. List each target once."), Index);
+			return false;
+		}
+		UniqueTargets.Add(Target);
+		if (Target->Parameters.TargetType != ECGHTargetType::Point && Target->Parameters.TargetType != ECGHTargetType::Mesh)
+		{
+			Error = FString::Printf(TEXT("Target[%d] must have type Point or Mesh."), Index);
+			return false;
+		}
+	}
+
+	// Target actors own/rebuild their sampling caches. Polling copies only the small descriptions.
+	Workbench->UpdateSceneDescription();
+	int64 SourceCount = 0;
+	Out.Targets.Reserve(Workbench->Targets.Num());
+	for (int32 Index = 0; Index < Workbench->Targets.Num(); ++Index)
+	{
+		ACGHTargetActor* Target = Workbench->Targets[Index];
+		if (Target->GetReferenceSLM() != Workbench->SLM || !Target->bResourcesValid)
+		{
+			Error = FString::Printf(TEXT("Target[%d] must have valid resources in this workbench's SLM frame. %s"),
+				Index, *Target->ResourceError);
+			return false;
+		}
+		if (Target->TargetDescription.TargetType == ECGHTargetType::Mesh)
+		{
+			const FCGHPointCloudResource& Cloud = Target->PointCloudResource;
+			if (Cloud.Points.IsEmpty() || Cloud.ResourceId == 0 || Cloud.Revision == 0
+				|| Cloud.ResourceId != Target->TargetDescription.ResourceId
+				|| Cloud.Revision != Target->TargetDescription.Revision)
+			{
+				Error = FString::Printf(TEXT("Target[%d] needs a nonempty point cloud matching its resource identity and revision."), Index);
+				return false;
+			}
+			SourceCount += Cloud.Points.Num();
+		}
+		else
+		{
+			++SourceCount;
+		}
+		Out.Targets.Add(Target);
+	}
+	if (SourceCount > CGHPointFocus::MaximumEmitterCount)
+	{
+		Error = TEXT("Combined point and mesh targets exceed the 1,000,000 source-sample limit. Reduce mesh sampling density.");
 		return false;
 	}
 	Workbench->SLM->SynchronizePhasePattern();
@@ -65,29 +110,26 @@ bool ACGHSolverActor::CaptureSubmission(FCGHSolverSubmission& Out, FString& Erro
 	Out.Parameters = Parameters;
 	Out.Workbench = Workbench;
 	Out.SLM = Workbench->SLM;
-	Out.Target = Target;
 	Out.Light = Workbench->ReconstructionLight;
 	Out.PhaseRevision = Workbench->SLM->GetPhasePatternRevision();
-	// Validate even fields that do not affect the scalar phase (amplitude/polarization).
-	// This also rejects invalid edits made after submission, before any publication.
-	return CGHPointFocus::ValidateInput(Out.Input, Error);
+	// Deep point-cloud validation/transformation is worker work, not per-frame game-thread work.
+	return CGHPointFocus::ValidateScene(Out.Input, Error);
 }
 
 bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolverSubmission& B)
 {
-	if (A.Workbench != B.Workbench || A.SLM != B.SLM || A.Target != B.Target || A.Light != B.Light
+	if (A.Workbench != B.Workbench || A.SLM != B.SLM || A.Targets != B.Targets || A.Light != B.Light
 		|| A.Parameters.SolverBackend != B.Parameters.SolverBackend || A.Parameters.Algorithm != B.Parameters.Algorithm)
 	{
 		return false;
 	}
 	const auto SameScalar = [](double X, double Y)
 	{
-		// Stable invalid input must not enqueue a new failed request every editor tick.
 		return X == Y || (FMath::IsNaN(X) && FMath::IsNaN(Y));
 	};
 	const FCGHSceneDescription& X = A.Input.Scene;
 	const FCGHSceneDescription& Y = B.Input.Scene;
-	if (X.SchemaVersion != Y.SchemaVersion || X.Targets.Num() != 1 || Y.Targets.Num() != 1
+	if (X.SchemaVersion != Y.SchemaVersion || X.Targets.Num() != Y.Targets.Num()
 		|| X.SLM.ResolutionX != Y.SLM.ResolutionX || X.SLM.ResolutionY != Y.SLM.ResolutionY
 		|| !SameScalar(X.SLM.PixelPitchXM, Y.SLM.PixelPitchXM) || !SameScalar(X.SLM.PixelPitchYM, Y.SLM.PixelPitchYM)
 		|| X.SLM.ModulationType != Y.SLM.ModulationType
@@ -100,13 +142,29 @@ bool ACGHSolverActor::SameInputs(const FCGHSolverSubmission& A, const FCGHSolver
 	{
 		return false;
 	}
-	// Capture validates all accepted inputs. Valid amplitude/polarization changes,
-	// plane-wave position, camera, display, and resource revisions do not change phase.
-	return X.Targets[0].TargetType == Y.Targets[0].TargetType
-		&& SameScalar(X.Targets[0].PositionSLMM.X, Y.Targets[0].PositionSLMM.X)
-		&& SameScalar(X.Targets[0].PositionSLMM.Y, Y.Targets[0].PositionSLMM.Y)
-		&& SameScalar(X.Targets[0].PositionSLMM.Z, Y.Targets[0].PositionSLMM.Z)
-		&& SameScalar(X.Targets[0].PhaseRad, Y.Targets[0].PhaseRad);
+	for (int32 Index = 0; Index < X.Targets.Num(); ++Index)
+	{
+		const FCGHTargetDescription& First = X.Targets[Index];
+		const FCGHTargetDescription& Second = Y.Targets[Index];
+		if (First.TargetType != Second.TargetType
+			|| !SameScalar(First.PositionSLMM.X, Second.PositionSLMM.X)
+			|| !SameScalar(First.PositionSLMM.Y, Second.PositionSLMM.Y)
+			|| !SameScalar(First.PositionSLMM.Z, Second.PositionSLMM.Z)
+			|| !SameScalar(First.Amplitude, Second.Amplitude)
+			|| !SameScalar(First.PhaseRad, Second.PhaseRad))
+		{
+			return false;
+		}
+		if (First.TargetType == ECGHTargetType::Mesh
+			&& (First.ResourceId != Second.ResourceId || First.Revision != Second.Revision
+				|| !First.RotationSLM.Equals(Second.RotationSLM, 0.0)))
+		{
+			return false;
+		}
+	}
+	// Light magnitude/polarization/position and point orientation do not affect this scalar phase.
+	// Mesh revisions track cloud shape, component/actor scale, sampling, and per-sample optical data.
+	return true;
 }
 
 void ACGHSolverActor::FailRequest(const FString& Error)
@@ -150,7 +208,7 @@ bool ACGHSolverActor::StartSolve()
 	bAcceptActiveResult = false;
 	PendingSubmission = MoveTemp(Submission);
 	JobState = ECGHSolverJobState::Queued;
-	StatusMessage = TEXT("PointFocus queued (propagation exp(+i k r)).");
+	StatusMessage = TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r)).");
 	// A replaced worker is reaped before another starts, bounding large output buffers.
 	if (!ActiveJob)
 	{
@@ -212,6 +270,15 @@ void ACGHSolverActor::SubmitPending()
 	PendingSubmission.Reset();
 	// Submit a separate value copy: workers receive no actor/UObject pointers.
 	FCGHSolverInput Input = ActiveSubmission->Input;
+	for (const TWeakObjectPtr<ACGHTargetActor>& Target : ActiveSubmission->Targets)
+	{
+		if (Target->TargetDescription.TargetType == ECGHTargetType::Mesh)
+		{
+			// One owned copy at launch; no bulk arrays in pending/active/last-attempt guards.
+			// Later actor resource rebuilds cannot mutate a running job's cloud.
+			Input.PointClouds.Add(Target->PointCloudResource);
+		}
+	}
 	ActiveJob = Backend->Submit(MoveTemp(Input));
 	bAcceptActiveResult = ActiveJob.IsValid();
 	if (!ActiveJob)
@@ -258,7 +325,7 @@ void ACGHSolverActor::PollSolver()
 					LastPublishedSLM = Destination;
 					LastPublishedPhaseRevision = Destination->GetPhasePatternRevision();
 					JobState = ECGHSolverJobState::Ready;
-					StatusMessage = TEXT("PointFocus phase published with plane-wave illumination compensation (exp(+i k r)).");
+					StatusMessage = TEXT("PointFocus complex-field phase published with plane-wave illumination compensation (exp(+i k r)).");
 				}
 				else
 				{
@@ -278,7 +345,7 @@ void ACGHSolverActor::PollSolver()
 		&& ActiveJob->bStarted.load(std::memory_order_acquire))
 	{
 		JobState = ECGHSolverJobState::Running;
-		StatusMessage = TEXT("Computing PointFocus on the CPU worker.");
+		StatusMessage = TEXT("Summing point and mesh complex fields on the CPU worker.");
 	}
 	if (bAutoSolve)
 	{

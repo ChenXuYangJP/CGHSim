@@ -16,6 +16,7 @@ enum class ECGHSolverBackend : uint8
 UENUM(BlueprintType)
 enum class ECGHSolverAlgorithm : uint8
 {
+	/** Complex-field superposition of point targets and mesh point-cloud samples. */
 	PointFocus
 };
 
@@ -53,6 +54,8 @@ struct CGHSIM_API FCGHSolverParameters
 struct CGHSIM_API FCGHSolverInput
 {
 	FCGHSceneDescription Scene;
+	/** Owned snapshots for mesh targets, matched by ResourceId and Revision; absent for points. */
+	TArray<FCGHPointCloudResource> PointClouds;
 	ECGHSolverAlgorithm Algorithm = ECGHSolverAlgorithm::PointFocus;
 	ECGHPropagationConvention PropagationConvention = ECGHPropagationConvention::ExpPositiveIKR;
 };

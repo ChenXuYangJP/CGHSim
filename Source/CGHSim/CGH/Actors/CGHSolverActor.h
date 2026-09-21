@@ -11,14 +11,14 @@ class ACGHTargetActor;
 class ACGHReconstructionLightActor;
 class UCGHSolverBackend;
 
-/** Game-thread publication guards kept outside the worker's immutable numerical input. */
+/** Game-thread publication guards. Input holds descriptions only; bulk clouds belong to the worker job. */
 struct FCGHSolverSubmission
 {
 	FCGHSolverInput Input;
 	FCGHSolverParameters Parameters;
 	TWeakObjectPtr<ACGHWorkbenchActor> Workbench;
 	TWeakObjectPtr<ACGHSLMActor> SLM;
-	TWeakObjectPtr<ACGHTargetActor> Target;
+	TArray<TWeakObjectPtr<ACGHTargetActor>> Targets;
 	TWeakObjectPtr<ACGHReconstructionLightActor> Light;
 	uint64 PhaseRevision = 0;
 };
@@ -51,7 +51,7 @@ public:
 	ECGHSolverJobState JobState = ECGHSolverJobState::Idle;
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Solver")
-	FString StatusMessage = TEXT("Ready to generate a point-focus phase pattern.");
+	FString StatusMessage = TEXT("Ready to generate a phase pattern from point and mesh targets.");
 
 	/** Monotonic request identifier for this actor instance; active buffers are transient. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Solver")

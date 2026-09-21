@@ -26,6 +26,7 @@ namespace
 		Target.TargetType = ECGHTargetType::Point;
 		Target.PositionSLMM = FVector(0.021, 0.0017, -0.003);
 		Target.PhaseRad = 1.234;
+		Target.Amplitude = 1.0;
 		Input.Scene.Targets.Add(Target);
 		return Input;
 	}
@@ -218,8 +219,7 @@ bool FCGHPointFocusValidationTest::RunTest(const FString& Parameters)
 	Reject(TEXT("Complex modulation is unsupported"), [](FCGHSolverInput& I) { I.Scene.SLM.ModulationType = ECGHSLMModulationType::Complex; });
 	Reject(TEXT("Unknown modulation is rejected"), [](FCGHSolverInput& I) { I.Scene.SLM.ModulationType = static_cast<ECGHSLMModulationType>(255); });
 	Reject(TEXT("Empty target list is rejected"), [](FCGHSolverInput& I) { I.Scene.Targets.Reset(); });
-	Reject(TEXT("Multiple targets are rejected"), [](FCGHSolverInput& I) { I.Scene.Targets.Add(FCGHTargetDescription()); });
-	Reject(TEXT("A mesh target is rejected"), [](FCGHSolverInput& I) { I.Scene.Targets[0].TargetType = ECGHTargetType::Mesh; });
+	Reject(TEXT("A mesh target without its resource is rejected"), [](FCGHSolverInput& I) { I.Scene.Targets[0].TargetType = ECGHTargetType::Mesh; });
 	Reject(TEXT("Unknown target type is rejected"), [](FCGHSolverInput& I) { I.Scene.Targets[0].TargetType = static_cast<ECGHTargetType>(255); });
 	Reject(TEXT("Zero dimensions are rejected"), [](FCGHSolverInput& I) { I.Scene.SLM.ResolutionX = 0; });
 	Reject(TEXT("Negative dimensions are rejected"), [](FCGHSolverInput& I) { I.Scene.SLM.ResolutionY = -1; });
@@ -347,11 +347,11 @@ bool FCGHPointFocusIlluminationScopeTest::RunTest(const FString& Parameters)
 	Input.Scene.ReconstructionLight.PositionSLMM = FVector(10.0, -20.0, 30.0);
 	Input.Scene.ReconstructionLight.PolarizationAngleRad = 1.3;
 	Input.Scene.ReconstructionLight.Amplitude = 0.0;
-	Input.Scene.Targets[0].Amplitude = 0.0;
+	Input.Scene.Targets[0].Amplitude = 3.0;
 	const FCGHSolverResult UnsimulatedFields = CGHPointFocus::Solve(Input, CancelRequested);
-	TestTrue(TEXT("Finite polarization and zero amplitude are accepted by the phase-only calculation"),
+	TestTrue(TEXT("Finite polarization and zero illumination amplitude are accepted by the phase-only calculation"),
 		Reference.bSucceeded && UnsimulatedFields.bSucceeded);
-	TestTrue(TEXT("Plane-wave position, polarization and amplitudes do not affect the phase pattern"),
+	TestTrue(TEXT("Plane-wave position, polarization and light amplitude, and positive single-point amplitude do not affect phase"),
 		Reference.Pattern.PhaseRad == UnsimulatedFields.Pattern.PhaseRad);
 	Input.Scene.ReconstructionLight.Amplitude = 3.75;
 	const FCGHSolverResult PositiveAmplitude = CGHPointFocus::Solve(Input, CancelRequested);
