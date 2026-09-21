@@ -10,7 +10,7 @@ UENUM(BlueprintType)
 enum class ECGHSolverBackend : uint8
 {
 	CPU,
-	Docker UMETA(DisplayName = "Docker (TCP dummy)")
+	Docker UMETA(DisplayName = "Docker (TCP/CUDA)")
 };
 
 UENUM(BlueprintType)
@@ -92,6 +92,8 @@ struct CGHSIM_API FCGHSolverResult
 	FCGHSLMPhasePattern Pattern;
 	FString Error;
 	bool bSucceeded = false;
+	/** True only for a remote transport fixture; real CPU/CUDA PointFocus results leave this false. */
+	bool bIsDummy = false;
 	double ComputeSeconds = 0.0;
 };
 

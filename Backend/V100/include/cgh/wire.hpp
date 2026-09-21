@@ -1,6 +1,6 @@
 #pragma once
 
-// CGHV 1.0: portable owned snapshots; no Unreal, CUDA, RTTI or exception dependency.
+// CGHV 1.1: portable owned snapshots; no Unreal, CUDA, RTTI or exception dependency.
 #include <atomic>
 #include <cmath>
 #include <cstddef>
@@ -14,7 +14,7 @@
 #include <vector>
 
 namespace cgh { namespace wire {
-constexpr std::uint16_t kMajor = 1, kMinor = 0;
+constexpr std::uint16_t kMajor = 1, kMinor = 1;
 constexpr std::size_t kHeaderSize = 32;
 constexpr std::uint64_t kMaxPayloadBytes = 256ull * 1024 * 1024;
 constexpr std::uint32_t kMaxAxis = 16384, kMaxPixels = 16777216, kMaxEmitters = 1000000;
@@ -26,7 +26,7 @@ enum class Convention : std::uint32_t { ExpPositiveIKR = 1 };
 enum class Modulation : std::uint32_t { PhaseOnly = 1, Complex = 2 };
 enum class Source : std::uint32_t { PlaneWave = 1, PointSource = 2 };
 enum class TargetKind : std::uint32_t { Point = 1, Mesh = 2 };
-enum class Status : std::uint32_t { DummySuccess = 1 };
+enum class Status : std::uint32_t { DummySuccess = 1, PointFocusSuccess = 2 };
 struct Header {
     Type type = Type::Request;
     std::uint64_t request_id = 0, payload_size = 0;
@@ -223,7 +223,7 @@ inline bool DecodeRequest(const std::uint8_t* bytes, std::size_t size, Request& 
     request = std::move(q); return true;
 }
 inline bool ValidateResult(const Result& result, std::string& error, const std::atomic<bool>* cancelled = nullptr) {
-    error.clear(); if (result.status != Status::DummySuccess || result.convention != Convention::ExpPositiveIKR) return Fail(error, "Unsupported result status or convention");
+    error.clear(); if ((result.status != Status::DummySuccess && result.status != Status::PointFocusSuccess) || result.convention != Convention::ExpPositiveIKR) return Fail(error, "Unsupported result status or convention");
     if (!ValidDimensions(result.resolution_x, result.resolution_y) || result.phase_radians.size() != std::uint64_t(result.resolution_x) * result.resolution_y) return Fail(error, "Invalid result dimensions or phase count");
     if (!std::isfinite(result.compute_seconds) || result.compute_seconds < 0) return Fail(error, "Invalid compute time");
     for (double phase : result.phase_radians) { if (IsCancelled(cancelled)) return Fail(error, "Cancelled"); if (!std::isfinite(phase) || phase < 0 || phase >= kTwoPi) return Fail(error, "Invalid phase value"); }

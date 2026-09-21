@@ -244,7 +244,7 @@ bool ACGHSolverActor::StartSolve()
 	PendingSubmission = MoveTemp(Submission);
 	JobState = ECGHSolverJobState::Queued;
 	StatusMessage = Parameters.SolverBackend == ECGHSolverBackend::Docker
-		? TEXT("Docker TCP dummy request queued; no optical computation is performed.")
+		? TEXT("Docker TCP solver request queued.")
 		: TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r)).");
 	// A replaced worker is reaped before another starts, bounding large output buffers.
 	if (!ActiveJob)
@@ -371,7 +371,9 @@ void ACGHSolverActor::PollSolver()
 					LastPublishedPhaseRevision = Destination->GetPhasePatternRevision();
 					JobState = ECGHSolverJobState::Ready;
 					StatusMessage = ActiveSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker
-						? TEXT("Docker TCP dummy phase published to SLM; this is a transport test, not an optical solution.")
+						? (ActiveJob->Result.bIsDummy
+							? TEXT("Docker TCP dummy phase published to SLM; this is a transport test, not an optical solution.")
+							: TEXT("CUDA PointFocus complex-field phase received over TCP and published to SLM (exp(+i k r))."))
 						: TEXT("PointFocus complex-field phase published with plane-wave illumination compensation (exp(+i k r)).");
 				}
 				else
@@ -393,7 +395,7 @@ void ACGHSolverActor::PollSolver()
 	{
 		JobState = ECGHSolverJobState::Running;
 		StatusMessage = ActiveSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker
-			? TEXT("Docker TCP request in progress; waiting for the dummy backend result.")
+			? TEXT("Docker TCP request in progress; waiting for the remote solver result.")
 			: TEXT("Summing point and mesh complex fields on the CPU worker.");
 	}
 	if (bAutoSolve)

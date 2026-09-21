@@ -10,12 +10,13 @@ int main() {
     std::vector<std::uint8_t> bytes;
     w::Header h; h.request_id = 0x0102030405060708ull; h.payload_size = 0x01020304;
     CHECK(w::EncodeHeader(h, bytes, error));
-    CHECK(bytes.size() == 32 && bytes[0] == 'C' && bytes[3] == 'V' && bytes[5] == 1);
+    CHECK(bytes.size() == 32 && bytes[0] == 'C' && bytes[3] == 'V' && bytes[5] == 1 && bytes[7] == 1);
     CHECK(bytes[16] == 1 && bytes[23] == 8 && bytes[28] == 1 && bytes[31] == 4);
     w::Header decoded_header;
     CHECK(w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
     for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeHeader(bytes.data(), n, decoded_header, error));
-    bytes[7] = 1; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error)); bytes[7] = 0;
+    bytes[7] = 0; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
+    bytes[7] = 2; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error)); bytes[7] = 1;
     bytes[11] = 1; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
     h.payload_size = w::kMaxPayloadBytes + 1; CHECK(!w::EncodeHeader(h, bytes, error));
     h.payload_size = 1; h.type = w::Type::Cancel; CHECK(!w::EncodeHeader(h, bytes, error));
@@ -46,6 +47,10 @@ int main() {
     CHECK(w::EncodeResult(result, bytes, error)); CHECK(bytes.size() == 64);
     w::Result decoded_result; CHECK(w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error));
     CHECK(decoded_result.phase_radians[3] == 6 && decoded_result.status == w::Status::DummySuccess);
+    result.status = w::Status::PointFocusSuccess;
+    CHECK(w::EncodeResult(result, bytes, error));
+    CHECK(w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error));
+    CHECK(decoded_result.status == w::Status::PointFocusSuccess && decoded_result.phase_radians[3] == 6);
     for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeResult(bytes.data(), n, decoded_result, error));
     CHECK(!w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error, &cancelled));
     damaged = bytes; damaged[3] = 99; CHECK(!w::DecodeResult(damaged.data(), damaged.size(), decoded_result, error));

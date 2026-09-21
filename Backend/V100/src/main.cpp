@@ -1,4 +1,5 @@
 #include "cgh/wire.hpp"
+#include "solver/CudaPointFocus.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -31,7 +32,10 @@ struct Socket {
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 };
-struct Settings { int port = 7000, delay_ms = 0, io_timeout_ms = 30000, max_clients = 8; };
+struct Settings {
+    int port = 7000, delay_ms = 0, io_timeout_ms = 30000, max_clients = 8;
+    bool dummy = false;
+};
 
 bool Wait(int fd, short events, Clock::time_point deadline, const std::atomic<bool>* cancelled) {
     while (!stop_requested.load(std::memory_order_relaxed) && !wire::IsCancelled(cancelled) && Clock::now() < deadline) {
@@ -118,7 +122,6 @@ private:
 };
 
 void HandleClient(int fd, Settings settings) {
-    Socket socket(fd);
     const auto deadline = Clock::now() + std::chrono::milliseconds(settings.io_timeout_ms);
     std::uint8_t header_bytes[wire::kHeaderSize];
     if (!Transfer(fd, header_bytes, sizeof(header_bytes), false, deadline)) return;
@@ -153,19 +156,15 @@ void HandleClient(int fd, Settings settings) {
         ::poll(&p, 1, 10);
     }
     if (cancelled()) return;
-    const auto compute_start = Clock::now();
     wire::Result result;
-    result.convention = request.convention;
-    result.resolution_x = request.slm.resolution_x;
-    result.resolution_y = request.slm.resolution_y;
-    result.phase_radians.resize(std::size_t(result.resolution_x) * result.resolution_y);
-    for (std::uint32_t y = 0; y < result.resolution_y; ++y) {
-        if (cancelled()) return;
-        for (std::uint32_t x = 0; x < result.resolution_x; ++x)
-            result.phase_radians[std::size_t(y) * result.resolution_x + x] = wire::kTwoPi * ((x + 3u * y) % 256u) / 256.0;
-    }
-    result.compute_seconds = std::chrono::duration<double>(Clock::now() - compute_start).count();
+    const bool solved = settings.dummy
+        ? cgh::solver::DummyPointFocus::Solve(request, result, error, monitor.requested)
+        : cgh::solver::CudaPointFocus::Solve(request, result, error, monitor.requested);
     if (cancelled()) return;
+    if (!solved) {
+        SendError(fd, header.request_id, error, settings);
+        return;
+    }
     if (!wire::EncodeResult(result, payload, error, &monitor.requested)) {
         if (!cancelled()) SendError(fd, header.request_id, error, settings);
         return;
@@ -188,9 +187,16 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string option = argv[i];
         if (option == "--help") {
-            std::cout << "cgh_v100_server [--port 7000] [--delay-ms 0] [--io-timeout-ms 30000] [--max-clients 8]\n"
-                         "CGHV 1.0 dummy solver; no CUDA or optical computation.\n";
+            std::cout << "cgh_v100_server [--port 7000] [--solver cuda|dummy] [--delay-ms 0] [--io-timeout-ms 30000] [--max-clients 8]\n"
+                         "CGHV 1.1 CUDA PointFocus solver; --solver dummy enables the transport fixture.\n";
             return 0;
+        }
+        if (option == "--solver") {
+            if (i + 1 >= argc) { std::cerr << "Missing solver name\n"; return 2; }
+            const std::string solver = argv[++i];
+            if (solver != "cuda" && solver != "dummy") { std::cerr << "Solver must be cuda or dummy\n"; return 2; }
+            settings.dummy = solver == "dummy";
+            continue;
         }
         int value;
         if (i + 1 >= argc || !ParseNumber(argv[++i], value)) { std::cerr << "Invalid option value\n"; return 2; }
@@ -211,21 +217,30 @@ int main(int argc, char** argv) {
     std::cout << "LISTENING " << ntohs(address.sin_port) << std::endl;
     struct Client { std::thread thread; std::shared_ptr<std::atomic<bool>> done; };
     std::vector<Client> clients;
-    while (!stop_requested.load(std::memory_order_relaxed)) {
+    const auto reap_finished_clients = [&clients] {
         for (auto it = clients.begin(); it != clients.end();) {
             if (it->done->load(std::memory_order_acquire)) { it->thread.join(); it = clients.erase(it); } else ++it;
         }
+    };
+    while (!stop_requested.load(std::memory_order_relaxed)) {
+        reap_finished_clients();
         pollfd p{listener.fd, POLLIN, 0};
         const auto ready = ::poll(&p, 1, 100);
         if (ready < 0 && errno != EINTR) { std::perror("poll"); break; }
         if (ready <= 0 || !(p.revents & POLLIN)) continue;
         const int fd = ::accept4(listener.fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (fd < 0) continue;
+        // A job may finish while poll/accept waits. Reap again before admission
+        // so a closed previous connection does not consume the next job's slot.
+        reap_finished_clients();
         if (clients.size() >= static_cast<std::size_t>(settings.max_clients)) { ::close(fd); continue; }
         auto done = std::make_shared<std::atomic<bool>>(false);
         clients.push_back(Client{std::thread([fd, settings, done] {
+            Socket socket(fd);
             try { HandleClient(fd, settings); }
             catch (const std::exception& error) { std::cerr << "Client failed: " << error.what() << '\n'; }
+            // Publish completion before closing the socket. A client that sees
+            // EOF can then reconnect without racing the active-client count.
             done->store(true, std::memory_order_release);
         }), done});
     }

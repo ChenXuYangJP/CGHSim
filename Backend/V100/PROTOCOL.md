@@ -1,16 +1,16 @@
-# CGHV wire protocol 1.0
+# CGHV wire protocol 1.1
 
 The source of truth is [`include/cgh/wire.hpp`](include/cgh/wire.hpp). The wire format is independent of C++ object layout, Unreal reflection, native enum ordinals, padding, native byte order, and native pointers. Integer fields are unsigned, fixed-width, big-endian. Every optical scalar, vector/quaternion component, sample normal and UV uses IEEE 754 binary64 encoded as its big-endian 64-bit representation. Normals/UVs originating as UE floats are promoted to doubles without losing their original value.
 
-A connection handles one job. There is no compression, authentication, persistent resource cache or session negotiation in version 1.0. Lengths exclude the frame header. A receiver must handle partial sends/receives and validate the header before allocating the body.
+A connection handles one job. There is no compression, authentication, persistent resource cache or session negotiation in version 1.1. Lengths exclude the frame header. A receiver must handle partial sends/receives and validate the header before allocating the body.
 
 ## Frame header (32 bytes)
 
-| Offset | Width | Field | Version 1.0 value |
+| Offset | Width | Field | Version 1.1 value |
 | --- | --- | --- | --- |
 | 0 | 4 | Magic | ASCII `CGHV` |
 | 4 | 2 | Major version | 1 |
-| 6 | 2 | Minor version | 0 |
+| 6 | 2 | Minor version | 1 |
 | 8 | 2 | Message type | Request=1, Result=2, Cancel=3, Error=4 |
 | 10 | 2 | Flags | 0 |
 | 12 | 4 | Reserved | 0 |
@@ -30,9 +30,9 @@ All payload enums are `u32`; they must be explicitly mapped by clients, never co
 | SLM modulation | PhaseOnly=1, Complex=2 |
 | Light source | PlaneWave=1, PointSource=2 |
 | Target kind | Point=1, Mesh=2 |
-| Result status | DummySuccess=1 |
+| Result status | DummySuccess=1, PointFocusSuccess=2 |
 
-Unknown enum values are rejected. The dummy server accepts recognized modulation/source metadata but performs no optical computation. `DummySuccess` is intentionally distinct from a future physically computed success status.
+Unknown enum values are rejected. The CUDA PointFocus solver requires PhaseOnly and PlaneWave. Explicit `--solver dummy` accepts recognized modulation/source metadata without optical computation. `DummySuccess` identifies that fixture; `PointFocusSuccess` identifies the actual PointFocus calculation.
 
 ## Request body
 
@@ -79,18 +79,18 @@ f64 u
 f64 v
 ```
 
-The canonical `FCGHSolverInput` numerical snapshot is preserved, including camera metadata, resource identity/revision and local sample fields. Compatibility aliases (`TargetId`, `PositionSLM`, `GeometryResourceId`, `GeometryRevision`) are omitted because their canonical values are already represented. Mesh triangle geometry is not part of `FCGHSolverInput` and is not sent. Point-cloud amplitude and phase already include target parameters; a future solver must not apply them twice.
+The canonical `FCGHSolverInput` numerical snapshot is preserved, including camera metadata, resource identity/revision and local sample fields. Compatibility aliases (`TargetId`, `PositionSLM`, `GeometryResourceId`, `GeometryRevision`) are omitted because their canonical values are already represented. Mesh triangle geometry is not part of `FCGHSolverInput` and is not sent. Point-cloud amplitude and phase already include target parameters; solvers must not apply them twice.
 
-Positions/pitches/extents use meters, phases/polarization use radians. The SLM rigid frame is `+X` optical normal, `+Y` increasing column, `+Z` decreasing row. Target positions/quaternions place rigid local mesh samples in the SLM frame; resource samples already include actor/component scale. Propagation convention 1 means `U(r) ∝ exp(+i*k*r)`: focusing subtracts `k*r` and incident phase from target phase. A future numerical server must implement this convention or reject it explicitly.
+Positions/pitches/extents use meters, phases/polarization use radians. The SLM rigid frame is `+X` optical normal, `+Y` increasing column, `+Z` decreasing row. Target positions/quaternions place rigid local mesh samples in the SLM frame; resource samples already include actor/component scale. Propagation convention 1 means `U(r) ∝ exp(+i*k*r)`: focusing subtracts `k*r` and incident phase from target phase. The CUDA solver implements this convention; future solvers must preserve it or reject it explicitly.
 
-All floating fields must be finite; pitches/extents/wavelength and dimensions are positive, amplitudes nonnegative. Missing camera metadata may retain its zero defaults. Camera integer dimensions must fit signed 32-bit UE values. SLM dimensions are at most 16384 per axis and 16,777,216 pixels total. Targets are nonempty, resource IDs cannot duplicate, mesh IDs/revisions must be nonzero, and each mesh joins exactly one nonempty cloud by both resource ID and revision. Unreferenced/duplicate clouds are rejected. Target count, cloud count, and the total of point targets plus all mesh samples are bounded by 1,000,000. These are transport/snapshot checks, not a replacement for future optical solver validation.
+All floating fields must be finite; pitches/extents/wavelength and dimensions are positive, amplitudes nonnegative. Missing camera metadata may retain its zero defaults. Camera integer dimensions must fit signed 32-bit UE values. SLM dimensions are at most 16384 per axis and 16,777,216 pixels total. Targets are nonempty, resource IDs cannot duplicate, mesh IDs/revisions must be nonzero, and each mesh joins exactly one nonempty cloud by both resource ID and revision. Unreferenced/duplicate clouds are rejected. Target count, cloud count, and the total of point targets plus all mesh samples are bounded by 1,000,000. These are transport/snapshot checks, not a replacement for PointFocus optical validation.
 
 Array bounds are checked against remaining bytes before allocation. Truncated records, trailing bytes, oversized bodies or mismatched revisions fail the complete job. No numerical array is accepted partially.
 
 ## Result body
 
 ```text
-u32 status                  # 1 = DummySuccess
+u32 status                  # 1 = DummySuccess, 2 = PointFocusSuccess
 u32 convention              # 1 = ExpPositiveIKR
 u32 resolution_x
 u32 resolution_y
@@ -99,7 +99,7 @@ u64 phase_count
 f64 phase_radians[phase_count]
 ```
 
-The fixed prefix is 32 bytes. `phase_count == resolution_x * resolution_y` and response dimensions equal the corresponding request. Phases are row-major, horizontal column increasing fastest, radians in `[0, 2*pi)`. Compute time is finite and nonnegative. A valid response reconstructs an owned `FCGHSolverResult` with `bSucceeded=true`, an empty error, matching propagation convention, and a complete phase pattern. `DummySuccess` describes transport validation only, with no claim of an optical solution.
+The fixed prefix is 32 bytes. `phase_count == resolution_x * resolution_y` and response dimensions equal the corresponding request. Phases are row-major, horizontal column increasing fastest, radians in `[0, 2*pi)`. Compute time is finite and nonnegative. A valid response reconstructs an owned `FCGHSolverResult` with `bSucceeded=true`, an empty error, matching propagation convention, and a complete phase pattern. `DummySuccess` describes transport validation only. `PointFocusSuccess` is returned by the CUDA port of the unchanged CPU reference algorithm. UE retains the distinction when reporting an accepted result.
 
 ## Error and cancellation
 
@@ -109,6 +109,6 @@ Cancel has zero payload and the active request ID. It is sent only after the com
 
 ## CUDA/V100 extension rules
 
-Version 1.0 readers require exactly major 1/minor 0 and zero flags/reserved bits; they never silently ignore unknown fields. A future backend can share the same owned request representation and replace dummy generation internally. Physically computed output needs an explicitly defined success status/version; it must not masquerade as `DummySuccess`.
+Version 1.1 readers require exactly major 1/minor 1 and zero flags/reserved bits; they never silently ignore unknown fields. The 1.1 CUDA backend shares the same owned request representation as the earlier 1.0 dummy service. Adding `PointFocusSuccess=2` changes the supported result semantics, so both endpoints now require minor version 1. Version 1.0 and 1.1 peers reject each other explicitly. The unchanged request/result field layout does not imply version compatibility. A numerical result must not masquerade as `DummySuccess`.
 
-Use a new major version for incompatible representations or changed field semantics. A future minor version can add explicitly negotiated capabilities, algorithm identifiers, result status values, precision/compression options, resource caching or new message types. Introduce a capability/hello exchange in that version before optional messages or payload extensions are used; existing 1.0 peers will reject it predictably. Reserve header bits until their semantics, validation and negotiation are documented. Scene schema version is separate from transport version, and new scene schemas require explicit support. Preserve unit conventions, row order, resource revisions and propagation signs when implementing CUDA kernels.
+Use a new major version for incompatible representations or changed field semantics. A future minor version can add explicitly negotiated capabilities, algorithm identifiers, result status values, precision/compression options, resource caching or new message types. Introduce a capability/hello exchange in that version before optional messages or payload extensions are used; existing 1.1 peers will reject it predictably. Reserve header bits until their semantics, validation and negotiation are documented. Scene schema version is separate from transport version, and new scene schemas require explicit support. Preserve unit conventions, row order, resource revisions and propagation signs when implementing CUDA kernels.

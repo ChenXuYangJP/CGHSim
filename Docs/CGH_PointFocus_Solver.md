@@ -48,7 +48,7 @@ Normal incidence along either local +X or -X has `dot(DirectionSLM, p) = 0` beca
 
 Light amplitude must be finite and nonnegative, and `PolarizationAngleRad` must be finite. They are validated but do not change this scalar phase-only result. Target amplitudes do set relative weights in the complex sum. Point-target rotation and marker geometry, and all camera parameters, are ignored. There is no polarization response, phase quantization, propagation image, or sensor simulation. `PointSource` and unknown light source types are rejected.
 
-`ECGHPropagationConvention::ExpPositiveIKR` is carried explicitly with each numerical request and returned in result metadata. The actor rejects a result whose convention differs from the submitted input. A future CUDA, FFT, or network backend must preserve this convention or convert its input/output signs deliberately. A library's negative-exponent transform convention alone does not change this contract.
+`ECGHPropagationConvention::ExpPositiveIKR` is carried explicitly with each numerical request and returned in result metadata. The actor rejects a result whose convention differs from the submitted input. The CUDA PointFocus backend preserves this convention. Future FFT or other backends must preserve it or convert their input/output signs deliberately. A library's negative-exponent transform convention alone does not change this contract.
 
 ## Accepted inputs
 
@@ -72,14 +72,15 @@ UE scene actors and cached mesh point clouds
     -> copy required point clouds at job launch
     -> FCGHSolverInput owned SI value snapshot
     -> UCGHSolverBackend
-    -> UCGHCPUSolverBackend / CGHPointFocus      [CPU worker]
+       -> CPU: UCGHCPUSolverBackend / CGHPointFocus [CPU worker]
+       -> Docker: UCGHDockerSolverBackend -> TCP -> CUDA PointFocus
     -> FCGHSolverResult / FCGHSLMPhasePattern
     -> ACGHSolverActor.PollSolver()             [game thread]
     -> SLM.SetPhasePattern()
     -> selected-SLM phase preview
 ```
 
-`ACGHSolverActor` owns job state, request identifiers, cancellation, queued input, and accepted publication. `UCGHSolverBackend::Submit()` is the replaceable backend boundary. `UCGHCPUSolverBackend` schedules the pure numerical calculation on Unreal's thread pool. `UCGHDockerSolverBackend` now implements the same boundary using asynchronous TCP and the standalone `Backend/V100` dummy server. Its output validates transport and publication only; the CPU backend and PointFocus numerical implementation are unchanged. See the [Docker backend guide](CGH_Docker_Backend.md).
+`ACGHSolverActor` owns job state, request identifiers, cancellation, queued input, and accepted publication. `UCGHSolverBackend::Submit()` is the replaceable backend boundary. `UCGHCPUSolverBackend` schedules the pure numerical calculation on Unreal's thread pool. `UCGHDockerSolverBackend` implements the same boundary using asynchronous TCP and the standalone `Backend/V100` CUDA PointFocus server. The server computes the same FP64 PointFocus algorithm on the selected V100; UE handles transport, job lifecycle, cancellation, and result reception. CGHV protocol 1.1 distinguishes computed results from the explicit `--solver dummy` transport-test mode. The CPU backend and PointFocus numerical implementation remain unchanged. See the [Docker backend guide](CGH_Docker_Backend.md).
 
 The worker receives an owned, immutable `FCGHSolverInput` snapshot containing plain copied scene data and the required point-cloud resources, plus a shared plain-data `FCGHSolverJob` with cancellation/completion flags and output. It never reads Actors or other UObjects. Only the worker writes its result, and the game thread reads it after the atomic completion flag is published. There is no per-pixel scene query or cross-thread Actor communication.
 
@@ -101,7 +102,7 @@ The solver defaults to **CPU**, **PointFocus**, and **Auto Solve disabled** (`bA
 | **Auto Solve** | Opt-in mode: submits initially and when consumed optical inputs, target list/references, or mesh resource revisions change. Target amplitude participates in the complex sum and now triggers recomputation. Cancelling does not immediately retry unchanged input. Restoring a temporarily missing reference allows automatic recovery; unchanged invalid numerical inputs, including NaNs, do not submit repeated jobs. Valid light position/amplitude/polarization changes, camera/debug appearance, and manual phase clear alone do not trigger recomputation; invalid fields still fail validation. |
 | `Idle` | No requested result awaiting publication; also used after cancellation. |
 | `Queued` | Request accepted, awaiting worker start or the previous worker's cancellation. |
-| `Running` | CPU worker has started the active request. |
+| `Running` | The selected backend worker has started the active request. |
 | `Ready` | Last accepted result was published to the SLM. With automatic updates disabled, subsequent scene edits require another Generate request. |
 | `Failed` | Input, backend, execution, or publication failed, or an obsolete result was rejected. Read `StatusMessage`. |
 | `JobId`, `LastComputeSeconds` | Request identifier and compute duration of the last successful computation considered for publication. |

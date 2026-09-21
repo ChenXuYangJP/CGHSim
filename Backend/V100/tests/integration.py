@@ -12,7 +12,7 @@ import time
 HEADER = struct.Struct("!4sHHHHIQQ")
 
 
-def frame(kind, request_id, payload=b"", major=1, minor=0, flags=0, reserved=0):
+def frame(kind, request_id, payload=b"", major=1, minor=1, flags=0, reserved=0):
     return HEADER.pack(b"CGHV", major, minor, kind, flags, reserved, request_id, len(payload)) + payload
 
 
@@ -40,7 +40,7 @@ def exact(sock, size):
 
 def receive(sock):
     magic, major, minor, kind, flags, reserved, identity, length = HEADER.unpack(exact(sock, HEADER.size))
-    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 0, 0, 0)
+    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 1, 0, 0)
     assert length <= 256 * 1024 * 1024
     return kind, identity, exact(sock, length)
 
@@ -100,12 +100,12 @@ def check_error(server, message):
 
 
 def main(executable):
-    server = Server(executable, "--io-timeout-ms", "300", "--max-clients", "8")
+    server = Server(executable, "--solver", "dummy", "--io-timeout-ms", "300", "--max-clients", "8")
     try:
         solve(server, 1, fragment=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda identity: solve(server, identity), range(2, 18)))
-        for changes in ({"major": 2}, {"minor": 1}, {"flags": 1}, {"reserved": 1}):
+        for changes in ({"major": 2}, {"minor": 0}, {"minor": 2}, {"flags": 1}, {"reserved": 1}):
             check_error(server, frame(1, 99, request(), **changes))
         check_error(server, frame(8, 99))
         check_error(server, frame(2, 99))
@@ -118,7 +118,7 @@ def main(executable):
         check_error(server, frame(1, 99, bad))
         bad = bytearray(request()); struct.pack_into("!Q", bad, 344, 10)
         check_error(server, frame(1, 99, bad))
-        check_error(server, HEADER.pack(b"CGHV", 1, 0, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
+        check_error(server, HEADER.pack(b"CGHV", 1, 1, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
         check_error(server, frame(1, 99, request(16385, 1)))
         with server.connect() as sock:
             sock.sendall(frame(1, 100, request())[:40])
@@ -129,7 +129,7 @@ def main(executable):
     finally:
         server.close()
 
-    server = Server(executable, "--delay-ms", "500", "--max-clients", "1")
+    server = Server(executable, "--solver", "dummy", "--delay-ms", "500", "--max-clients", "1")
     try:
         with server.connect() as sock:
             sock.sendall(frame(1, 200, request()))
@@ -148,7 +148,7 @@ def main(executable):
     finally:
         server.close()
 
-    server = Server(executable, "--io-timeout-ms", "3000", "--max-clients", "1")
+    server = Server(executable, "--solver", "dummy", "--io-timeout-ms", "3000", "--max-clients", "1")
     try:
         with server.connect() as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
