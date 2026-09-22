@@ -4,7 +4,7 @@
 
 CGHSim provides an editable scene for arranging a target, spatial light modulator (SLM), camera, and reconstruction light. Native C++ actors define optical parameters and validation; Blueprint children provide scene presentation.
 
-**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for multiple Point and Mesh targets by summing their complex fields, then compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. An explicit Save button persists the current phase as a reusable Unreal asset, numerical files, and an exact-resolution grayscale PNG. A second Docker/TCP backend runs the same PointFocus algorithm across the selected V100 GPUs using CUDA 12.9.2. The standalone server also retains an explicit dummy mode for transport tests. Optical reconstruction images and sensor simulation remain future work. The camera shows a standard Unreal geometry preview.
+**Current milestone:** an asynchronous CPU reference solver generates a phase-only SLM pattern for multiple Point and Mesh targets by summing their complex fields, then compensating incident PlaneWave phase under the explicit `exp(+i k r)` propagation convention. The workbench supplies SI scene descriptions; the solver publishes to the existing SLM preview. An explicit Save button persists the current phase as a reusable Unreal asset, numerical files, and an exact-resolution grayscale PNG. A second Docker/TCP backend runs the same PointFocus algorithm across the selected V100 GPUs using CUDA 12.9.2. The standalone server also retains an explicit dummy mode for transport tests. A separate asynchronous CPU reconstructor propagates the active SLM pattern onto an observer plane, retaining complex samples and providing phase/amplitude/intensity grayscale previews. Docker reconstruction and camera/lens reconstruction remain reserved modes. The camera shows a standard Unreal geometry preview.
 
 ## What works today
 
@@ -13,9 +13,11 @@ CGHSim provides an editable scene for arranging a target, spatial light modulato
 | **Target** | Point or static-mesh targets, configurable contour slicing and point spacing, versioned geometry/point-cloud resources, and a cached debug point-cloud view. |
 | **SLM** | Editable resolution/pitch and physical active area, validated transient phase storage, and an exact-resolution grayscale preview on selection. Includes explicit test-ramp, clear, and Save controls; saving writes a reusable phase asset, full-precision raw data, metadata, and a pixel-accurate grayscale PNG. |
 | **Camera** | Double-precision optical parameters synchronized to a Cine Camera preview, including focal length, aperture, sensor dimensions, and focus distance. |
-| **Reconstruction light** | Editable source/optical parameters. PointFocus uses PlaneWave wavelength, initial phase, and direction, with phase referenced to the SLM origin; amplitude/polarization are validated but unused by the scalar phase model. |
-| **Workbench** | Explicit actor references, an automatically updated SI scene description, configuration validation, and optional solver command/status controls. |
+| **Reconstruction light** | Editable source/optical parameters. PointFocus uses PlaneWave phase and direction; optical reconstruction uses PlaneWave or PointSource illumination and includes source amplitude. Polarization is validated but unused by these scalar models. |
+| **Workbench** | Explicit actor references, automatically updated SI scene/observer descriptions, configuration validation, and optional solver/reconstructor command and status controls. |
 | **Solver** | CPU PointFocus for one or more Point/Mesh targets, coherent point-cloud superposition, asynchronous jobs, cancellation, rejection of obsolete results, Generate button, and optional automatic updates. Docker/TCP is a second backend using a standalone CUDA/V100 PointFocus server and explicit dummy test mode; CPU remains the numerical reference. |
+| **Observer plane** | Independent resolution/pitch, double-precision complex samples, and a selected-actor phase/amplitude/intensity preview controlled from Details. Explicit Save writes a reusable field asset, raw complex data, metadata, and all three grayscale PNGs; matching saved grids can be loaded explicitly. |
+| **Reconstructor** | Asynchronous CPU Rayleigh–Sommerfeld diffraction from the active SLM pattern and reconstruction light, cancellation, stale-result rejection, and optional automatic updates. Docker and camera modes are reserved. |
 
 The checked-in starter level includes the five scene Blueprint actors with connected references, plus separate presentation geometry and lighting. Add the native **CGH Solver Actor** to an existing level and assign its **Workbench**. The asset generator also supports `BP_CGHSolver` and connects it when creating a new map; it preserves existing maps.
 
@@ -69,7 +71,8 @@ In the editor:
 4. Select the SLM for its phase inset; click **CGH > Phase > Load Stored Phase Pattern** to activate the bundled saved sample, or **Clear Phase Pattern** to remove it. **Generate Preview Phase Ramp** provides another display check. These samples do not run a solver.
 5. For a computed phase pattern, add **CGH Solver Actor**, set its **Workbench**, and add one or more distinct **Point** or **Mesh** entries to the workbench’s **Targets** list with a **PlaneWave** reconstruction light. Mesh targets use their sampled point clouds; keep contributing points off the SLM plane and start with a small grid/coarse sampling. Click **Generate Phase Pattern** with **CPU / PointFocus** selected; enable **Auto Solve** only if wanted. The [solver guide](Docs/CGH_PointFocus_Solver.md) covers workbench buttons, assumptions, and status.
 6. After the solver reaches **Ready**, click its **Save Phase Pattern** button to save a reusable Unreal asset, raw numerical files, and a grayscale PNG with one image pixel per SLM pixel. Configure the destinations on the SLM: **Phase Asset Save Folder** defaults to `/Game/CGHSim/PhasePatterns/Generated`; **Phase Raw Save Directory** defaults to `Saved/CGHSim/PhasePatterns` under the project. The SLM also has its own **Save Phase Pattern** button for any valid current pattern. See [saving and reloading](Docs/CGH_PointFocus_Solver.md#saving-and-reloading-phase-patterns).
-7. Save the level to preserve parameter and placement changes. Active phase data remains transient; after reopening, select a saved asset in the SLM's **Stored Phase Pattern** and click **Load Stored Phase Pattern**, or generate again. Save does not change that asset selection automatically.
+7. To inspect optical reconstruction, add **CGH Observer Plane Actor** and **CGH Reconstructor Actor**. Assign the observer on the workbench and the workbench on the reconstructor. Place the observer on the SLM-local **+X side**, start with small grids, and click **Reconstruct** with **CPU / Observer Plane** selected. Select the observer and choose **Amplitude**, **Phase**, or **Intensity** under **Preview Mode** in Details. Click **Save Complex Field** to save the numerical field and all three grayscale images. See the [reconstruction guide](Docs/CGH_Reconstruction.md) for the model, units, and asynchronous controls.
+8. Save the level to preserve parameter and placement changes. Active phase data remains transient; after reopening, select a saved asset in the SLM's **Stored Phase Pattern** and click **Load Stored Phase Pattern**, or generate again. Save does not change that asset selection automatically.
 
 The SLM is shown at its physical dimensions: the current native default `256 × 256` pixels at `8 µm` pitch produces an active area of **2.048 × 2.048 mm**. Existing Blueprint/level overrides may differ. Frame the SLM separately for a close view. Its phase inset scales to a readable size independently of physical pitch; **Camera Preview Size** controls the inset size. For point targets, the sphere is a selection marker rather than the mathematical point's physical extent. Mesh targets use their assigned static mesh and support **Show Point Cloud**.
 
@@ -92,9 +95,10 @@ CGHSim/
 ├── Source/CGHSim/
 │   ├── CGHSim.Build.cs
 │   └── CGH/
-│       ├── Actors/                  # Target, SLM, camera, light, workbench, solver
-│       ├── Components/              # Point-cloud rendering and SLM phase preview
-│       ├── Solver/                  # Backend interface and CPU PointFocus
+│       ├── Actors/                  # Optical actors, workbench, solver, reconstructor, observer
+│       ├── Components/              # Point-cloud rendering and SLM/observer previews
+│       ├── Solver/                  # Solver backends and CPU PointFocus
+│       ├── Reconstruction/          # Reconstruction backends and CPU diffraction
 │       ├── Types/                   # Optical descriptions, resources, phase pattern, jobs
 │       ├── Utils/                   # Unit conversion, mesh sampling, phase grayscale and persistence
 │       └── Tests/                   # Headless and Slate-render automation
@@ -116,7 +120,7 @@ CGHSim/
 - Unreal scene positions use **centimeters**; optical fields have explicit unit suffixes, and optical scalar parameters use `double`.
 - SLM local **+X** is optical forward, **+Y** is horizontal, and **+Z** is vertical. The active area lies in the local **YZ plane**.
 - Phase storage is `PhaseRad[row * ResolutionX + column]`: columns increase toward local **+Y**, rows toward **-Z**. `ResolutionX`/`PixelPitchXM` name the horizontal grid axis (local Y); `ResolutionY`/`PixelPitchYM` name the vertical grid axis (local Z). The [canonical pixel-coordinate rules](Docs/SLM_Pixel_Coordinates.md) define centered pixel positions and the requested +X-side front image (+Y right, +Z up), including the horizontal-mirror requirement for an ordinary Unreal camera on that side.
-- Keep SLM, camera and light actor scales at **(1, 1, 1)**. Mesh targets support nonuniform/mirrored scale; their resource coordinates already include it. SLM physical dimensions derive from resolution and pixel pitch.
+- Keep SLM, camera, observer and light actor scales at **(1, 1, 1)**. Mesh targets support nonuniform/mirrored scale; their resource coordinates already include it. SLM physical dimensions derive from resolution and pixel pitch.
 - Scene-description positions apply the SLM actor's inverse translation and rotation, then convert centimeters to meters. SLM reference scale is ignored. Mesh-target scale is baked into target-local geometry and point resources once.
 - Camera parameters drive the Cine Camera preview in one direction. Output resolution is currently stored as configuration data; it does not produce a sensor image.
 
@@ -165,6 +169,12 @@ Run the headless CGH automation tests after building the Editor target:
 
 ### Recorded verification
 
+**2026-09-22 — observer intensity:** Added normalized squared-magnitude previews and `_intensity.png` exports. Editor/Game builds, **82 headless tests**, and the rendered three-mode observer preview passed; six optional external-backend tests were skipped. See [preview mappings](Docs/CGH_Reconstruction.md#preview-mappings).
+
+**2026-09-22 — observer saving and Details-only preview:** Editor/Game builds, **82 headless tests**, and the rendered observer preview passed; six optional external-backend tests were skipped. Exact asset/raw round trips, phase/amplitude PNGs, save failure handling, and a fresh-process reload were verified. See [saving observer data](Docs/CGH_Reconstruction.md#saving-and-loading-observer-data).
+
+**2026-09-22 — observer-plane reconstruction:** Editor/Game Linux Development builds passed. The headless suite passed **78 tests**, with six optional existing Docker/CUDA server tests skipped and zero failures. All **18 new headless tests** and the separate Vulkan/Slate phase-and-amplitude preview test passed. See the [reconstruction verification record](Docs/CGH_Reconstruction.md#verification) for numerical coverage, artifacts, and limitations.
+
 **2026-09-21 — Docker/TCP dummy backend (historical C++-only transport environment):** Editor/Game builds, standalone CTest **2/2**, and all **63 headless CGH tests passed**. The publication test exercised a real Docker container through its published TCP port; cancellation, timeout, malformed replies and CPU/Docker switching passed. CPU/reference solver code and existing Content files remained unchanged. See the [Docker verification record](Docs/CGH_Docker_Backend.md#recorded-verification--2026-09-21). These results predate the CUDA 12.9.2 image upgrade; the [backend guide](Docs/CGH_Docker_Backend.md#verification) records validation for the current CUDA backend separately.
 
 **2026-09-21 — complex multi-target and mesh-cloud solver:** Editor/Game Linux Development builds and all **58 headless CGH tests passed**. A 256×256 mixed-scene solve with two Point targets, one Mesh target, and 78 emitters passed independent complex-field checks and cancellation checks. All 15 existing assets/maps remained unchanged. See the [solver verification record](Docs/CGH_PointFocus_Solver.md#verification-record) for coverage, timings, and limits. Earlier test counts and single-point timings below are historical.
@@ -197,7 +207,7 @@ Full workbench graphical acceptance, interactive Simulation and undo/redo, cooki
 
 1. Complete visual acceptance of the workbench and verify interactive Simulation.
 2. Establish a Linux cook/package checkpoint.
-3. Extend the CPU PointFocus reference with a numerically checked reconstruction view.
+3. Extend reconstruction with camera/lens propagation and a Docker backend, preserving CPU reference behavior.
 4. Extend CUDA/V100 performance and workload coverage while preserving numerical parity with the CPU reference and the versioned protocol.
 
 GS/FFT propagation, camera sensor simulation, and runtime parameter controls remain future scope. See the handoff for proposed ordering and acceptance criteria.
@@ -205,6 +215,7 @@ GS/FFT propagation, camera sensor simulation, and runtime parameter controls rem
 ## Documentation
 
 - [Docker/TCP V100 backend](Docs/CGH_Docker_Backend.md) — independent CUDA PointFocus server, GPU selection, versioned protocol, numerical parity and transport verification.
+- [Observer-plane reconstruction](Docs/CGH_Reconstruction.md) — complex field propagation, phase/amplitude/intensity previews, job lifecycle, and sampling limits.
 - [CPU PointFocus solver](Docs/CGH_PointFocus_Solver.md) — complex superposition, mesh emitters, propagation sign, asynchronous jobs, controls, and backend contract.
 - [SLM pixel coordinates and code audit](Docs/SLM_Pixel_Coordinates.md) — indexing, physical positions, grid-axis names, and canonical front-view versus Unreal camera orientation.
 - [Actor scaffold and usage](Docs/CGH_Actor_Scaffold.md) — class responsibilities, units, editor workflow, and scripts.

@@ -87,10 +87,11 @@ struct CGHSIM_API FCGHLightParameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (ClampMin = "0.001", Units = "nm"))
 	double WavelengthNm = 532.0;
 
+	/** Incident field amplitude for PlaneWave; PointSource reconstruction uses amplitude at one meter. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (ClampMin = "0.0"))
 	double Amplitude = 1.0;
 
-	/** PlaneWave PointFocus interprets this as incident phase at the SLM origin. */
+	/** PlaneWave phase at the SLM origin; PointSource emitted spherical-wave phase offset. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (Units = "rad"))
 	double InitialPhaseRad = 0.0;
 
@@ -174,11 +175,11 @@ struct CGHSIM_API FCGHReconstructionLightDescription
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "m"))
 	double WavelengthM = 0.0;
 
-	/** Finite, nonnegative field amplitude; does not affect scalar phase-only PointFocus. */
+	/** Nonnegative field amplitude (at one meter for PointSource); unused by phase-only PointFocus. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light")
 	double Amplitude = 0.0;
 
-	/** PlaneWave incident phase at SLM-local origin; phi_inc(P) = InitialPhaseRad + k*dot(DirectionSLM, P). */
+	/** PlaneWave phase at SLM origin: phi_inc(P) = InitialPhaseRad + k*dot(DirectionSLM, P). PointSource uses +k*r. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Light", meta = (Units = "rad"))
 	double InitialPhaseRad = 0.0;
 

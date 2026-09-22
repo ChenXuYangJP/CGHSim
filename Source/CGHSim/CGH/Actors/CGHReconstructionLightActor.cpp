@@ -42,6 +42,6 @@ void ACGHReconstructionLightActor::RefreshVisualization()
 	const FString SourceName = StaticEnum<ECGHSourceType>()->GetDisplayNameTextByValue(
 		static_cast<int64>(Parameters.SourceType)).ToString();
 	Label->SetText(FText::FromString(FString::Printf(
-		TEXT("Reconstruction Light\n%s | %.3g nm\nAmplitude: %.3g\nOptical propagation not implemented"),
+		TEXT("Reconstruction Light\n%s | %.3g nm\nAmplitude: %.3g"),
 		*SourceName, Parameters.WavelengthNm, Parameters.Amplitude)));
 }

@@ -1,6 +1,8 @@
 #include "CGH/Actors/CGHWorkbenchActor.h"
 
 #include "CGH/Actors/CGHCameraActor.h"
+#include "CGH/Actors/CGHObserverPlaneActor.h"
+#include "CGH/Actors/CGHReconstructorActor.h"
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHSolverActor.h"
@@ -92,10 +94,12 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 	}
 	TGuardValue<bool> UpdatingGuard(bUpdatingSceneDescription, true);
 	UpdateSolverStatus();
+	UpdateReconstructionStatus();
 	RefreshSceneObservers();
 
 	// Rebuild from scratch so deleted/unassigned references never retain stale data.
 	FCGHSceneDescription Updated;
+	UpdateReconstructionDescriptions(Updated.SLM, Updated.ReconstructionLight);
 	bSceneDescriptionComplete = false;
 	if (!IsSceneActorAvailable(SLM))
 	{
@@ -115,15 +119,6 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 		return SLMTransform.InverseTransformVectorNoScale(WorldDirection).GetSafeNormal();
 	};
 
-	const FCGHSLMParameters& SLMParameters = SLM->Parameters;
-	Updated.SLM.ResolutionX = SLMParameters.ResolutionX;
-	Updated.SLM.ResolutionY = SLMParameters.ResolutionY;
-	Updated.SLM.PixelPitchXM = CGHUnits::UmToM(SLMParameters.PixelPitchXUm);
-	Updated.SLM.PixelPitchYM = CGHUnits::UmToM(SLMParameters.PixelPitchYUm);
-	Updated.SLM.ActiveWidthM = SLMParameters.ResolutionX * Updated.SLM.PixelPitchXM;
-	Updated.SLM.ActiveHeightM = SLMParameters.ResolutionY * Updated.SLM.PixelPitchYM;
-	Updated.SLM.ModulationType = SLMParameters.ModulationType;
-
 	const bool bHasCamera = IsSceneActorAvailable(Camera);
 	if (bHasCamera)
 	{
@@ -141,17 +136,6 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 	}
 
 	const bool bHasLight = IsSceneActorAvailable(ReconstructionLight);
-	if (bHasLight)
-	{
-		const FCGHLightParameters& Parameters = ReconstructionLight->Parameters;
-		Updated.ReconstructionLight.WavelengthM = CGHUnits::NmToM(Parameters.WavelengthNm);
-		Updated.ReconstructionLight.Amplitude = Parameters.Amplitude;
-		Updated.ReconstructionLight.InitialPhaseRad = Parameters.InitialPhaseRad;
-		Updated.ReconstructionLight.DirectionSLM = LocalDirection(ReconstructionLight->GetPropagationDirection());
-		Updated.ReconstructionLight.SourceType = Parameters.SourceType;
-		Updated.ReconstructionLight.PositionSLMM = LocalPositionMeters(ReconstructionLight->GetActorLocation());
-		Updated.ReconstructionLight.PolarizationAngleRad = FMath::DegreesToRadians(Parameters.PolarizationAngleDeg);
-	}
 
 	bool bHasAllTargets = !Targets.IsEmpty();
 	Updated.Targets.Reserve(Targets.Num());
@@ -181,6 +165,111 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 	SceneDescription = MoveTemp(Updated);
 }
 
+void ACGHWorkbenchActor::UpdateReconstructionDescriptions(
+	FCGHSLMDescription& OutSLM, FCGHReconstructionLightDescription& OutLight)
+{
+	OutSLM = FCGHSLMDescription();
+	OutLight = FCGHReconstructionLightDescription();
+	ObserverPlaneDescription = FCGHObserverPlaneDescription();
+	bObserverPlaneDescriptionAvailable = false;
+	if (!IsSceneActorAvailable(SLM))
+	{
+		return;
+	}
+
+	const FCGHSLMParameters& SLMParameters = SLM->Parameters;
+	OutSLM.ResolutionX = SLMParameters.ResolutionX;
+	OutSLM.ResolutionY = SLMParameters.ResolutionY;
+	OutSLM.PixelPitchXM = CGHUnits::UmToM(SLMParameters.PixelPitchXUm);
+	OutSLM.PixelPitchYM = CGHUnits::UmToM(SLMParameters.PixelPitchYUm);
+	OutSLM.ActiveWidthM = SLMParameters.ResolutionX * OutSLM.PixelPitchXM;
+	OutSLM.ActiveHeightM = SLMParameters.ResolutionY * OutSLM.PixelPitchYM;
+	OutSLM.ModulationType = SLMParameters.ModulationType;
+
+	const FTransform SLMTransform = SLM->GetActorTransform();
+	const auto LocalPositionMeters = [&SLMTransform](const FVector& WorldPosition)
+	{
+		return SLMTransform.InverseTransformPositionNoScale(WorldPosition) * CGHUnits::CmToM(1.0);
+	};
+	const auto LocalDirection = [&SLMTransform](const FVector& WorldDirection)
+	{
+		return SLMTransform.InverseTransformVectorNoScale(WorldDirection).GetSafeNormal();
+	};
+	if (IsSceneActorAvailable(ReconstructionLight))
+	{
+		const FCGHLightParameters& Parameters = ReconstructionLight->Parameters;
+		OutLight.WavelengthM = CGHUnits::NmToM(Parameters.WavelengthNm);
+		OutLight.Amplitude = Parameters.Amplitude;
+		OutLight.InitialPhaseRad = Parameters.InitialPhaseRad;
+		OutLight.DirectionSLM = LocalDirection(ReconstructionLight->GetPropagationDirection());
+		OutLight.SourceType = Parameters.SourceType;
+		OutLight.PositionSLMM = LocalPositionMeters(ReconstructionLight->GetActorLocation());
+		OutLight.PolarizationAngleRad = FMath::DegreesToRadians(Parameters.PolarizationAngleDeg);
+	}
+
+	if (IsSceneActorAvailable(ObserverPlane))
+	{
+		const FCGHObserverPlaneParameters& Parameters = ObserverPlane->Parameters;
+		ObserverPlaneDescription.ResolutionX = Parameters.ResolutionX;
+		ObserverPlaneDescription.ResolutionY = Parameters.ResolutionY;
+		ObserverPlaneDescription.PixelPitchXM = CGHUnits::UmToM(Parameters.PixelPitchXUm);
+		ObserverPlaneDescription.PixelPitchYM = CGHUnits::UmToM(Parameters.PixelPitchYUm);
+		ObserverPlaneDescription.PositionSLMM = LocalPositionMeters(ObserverPlane->GetActorLocation());
+		ObserverPlaneDescription.RotationSLM = SLMTransform.GetRotation().Inverse() * ObserverPlane->GetActorQuat();
+		bObserverPlaneDescriptionAvailable = true;
+	}
+}
+
+bool ACGHWorkbenchActor::CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError)
+{
+	OutInput = FCGHReconstructionInput();
+	OutError.Reset();
+	if (!IsInGameThread())
+	{
+		OutError = TEXT("Reconstruction inputs must be captured on the game thread.");
+		return false;
+	}
+	if (IsTemplate() || !GetWorld())
+	{
+		OutError = TEXT("Reconstruction requires a workbench in a world.");
+		return false;
+	}
+	const auto CheckActor = [this, &OutError](const AActor* Actor, const TCHAR* Name)
+	{
+		if (!IsSceneActorAvailable(Actor))
+		{
+			OutError = FString::Printf(TEXT("%s must reference an available actor in the workbench's world."), Name);
+			return false;
+		}
+		const FTransform Transform = Actor->GetActorTransform();
+		if (Transform.ContainsNaN() || !Transform.GetRotation().IsNormalized())
+		{
+			OutError = FString::Printf(TEXT("%s requires a finite transform and normalized rotation."), Name);
+			return false;
+		}
+		if (!Transform.GetScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER))
+		{
+			OutError = FString::Printf(TEXT("%s actor scale must be (1, 1, 1); use pixel pitch to set physical size."), Name);
+			return false;
+		}
+		return true;
+	};
+	if (!CheckActor(SLM, TEXT("SLM")) || !CheckActor(ReconstructionLight, TEXT("Reconstruction light"))
+		|| !CheckActor(ObserverPlane, TEXT("Observer plane")))
+	{
+		return false;
+	}
+
+	// Reconstruction needs only optical metadata. Do not rebuild target meshes/clouds
+	// or require a camera merely to capture or compare a reconstruction request.
+	UpdateReconstructionDescriptions(SceneDescription.SLM, SceneDescription.ReconstructionLight);
+	OutInput.SLM = SceneDescription.SLM;
+	OutInput.Light = SceneDescription.ReconstructionLight;
+	OutInput.ObserverPlane = ObserverPlaneDescription;
+	OutInput.Mode = ECGHReconstructionMode::ObserverPlane;
+	return true;
+}
+
 void ACGHWorkbenchActor::RefreshSceneObservers()
 {
 	TArray<TWeakObjectPtr<AActor>> Actors;
@@ -199,6 +288,7 @@ void ACGHWorkbenchActor::RefreshSceneObservers()
 	ObserveActor(SLM);
 	ObserveActor(Camera);
 	ObserveActor(ReconstructionLight);
+	ObserveActor(ObserverPlane);
 	for (ACGHTargetActor* Target : Targets)
 	{
 		ObserveActor(Target);
@@ -272,7 +362,7 @@ bool ACGHWorkbenchActor::IsSceneObject(const UObject* Object) const
 	{
 		Actor = Object->GetTypedOuter<AActor>();
 	}
-	return Actor && (Actor == this || Actor == SLM || Actor == Camera || Actor == ReconstructionLight
+	return Actor && (Actor == this || Actor == SLM || Actor == Camera || Actor == ReconstructionLight || Actor == ObserverPlane
 		|| Targets.Contains(Actor));
 }
 
@@ -432,6 +522,10 @@ void ACGHWorkbenchActor::RefreshVisualization()
 	{
 		ReconstructionLight->RefreshVisualization();
 	}
+	if (IsValid(ObserverPlane))
+	{
+		ObserverPlane->RefreshVisualization();
+	}
 	for (ACGHTargetActor* Target : Targets)
 	{
 		if (IsValid(Target))
@@ -449,7 +543,8 @@ void ACGHWorkbenchActor::UpdateStatusLabel()
 		? TEXT("Configuration valid")
 		: FString::Printf(TEXT("Configuration invalid (%d issue(s))"), ValidationMessages.Num());
 	Label->SetText(FText::FromString(FString::Printf(
-		TEXT("CGH Workbench\n%s\nSolver: %s"), *Status, *SolverStatusMessage)));
+		TEXT("CGH Workbench\n%s\nSolver: %s\nReconstruction: %s"),
+		*Status, *SolverStatusMessage, *ReconstructionStatusMessage)));
 	Label->SetTextRenderColor(bSceneValid ? FColor(100, 230, 130) : FColor(255, 170, 70));
 }
 
@@ -501,4 +596,54 @@ void ACGHWorkbenchActor::CancelSolve()
 		Solver->CancelSolve();
 	}
 	UpdateSolverStatus();
+}
+
+void ACGHWorkbenchActor::UpdateReconstructionStatus()
+{
+	const ECGHReconstructionJobState PreviousState = ReconstructionJobState;
+	const FString PreviousMessage = ReconstructionStatusMessage;
+	if (!IsSceneActorAvailable(Reconstructor))
+	{
+		ReconstructionJobState = ECGHReconstructionJobState::Idle;
+		ReconstructionStatusMessage = TEXT("No reconstructor assigned in this world.");
+	}
+	else if (Reconstructor->Workbench != this)
+	{
+		ReconstructionJobState = ECGHReconstructionJobState::Idle;
+		ReconstructionStatusMessage = TEXT("Assign this workbench on the reconstructor, or press Reconstruct to bind an unassigned reconstructor.");
+	}
+	else
+	{
+		ReconstructionJobState = Reconstructor->JobState;
+		ReconstructionStatusMessage = Reconstructor->StatusMessage;
+	}
+	if (PreviousState != ReconstructionJobState || PreviousMessage != ReconstructionStatusMessage)
+	{
+		UpdateStatusLabel();
+	}
+}
+
+void ACGHWorkbenchActor::Reconstruct()
+{
+	if (IsSceneActorAvailable(Reconstructor))
+	{
+		if (!IsValid(Reconstructor->Workbench))
+		{
+			Reconstructor->Workbench = this;
+		}
+		if (Reconstructor->Workbench == this)
+		{
+			Reconstructor->StartReconstruction();
+		}
+	}
+	UpdateReconstructionStatus();
+}
+
+void ACGHWorkbenchActor::CancelReconstruction()
+{
+	if (IsSceneActorAvailable(Reconstructor) && Reconstructor->Workbench == this)
+	{
+		Reconstructor->CancelReconstruction();
+	}
+	UpdateReconstructionStatus();
 }

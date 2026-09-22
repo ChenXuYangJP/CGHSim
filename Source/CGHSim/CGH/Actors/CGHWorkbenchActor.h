@@ -3,10 +3,13 @@
 #include "CoreMinimal.h"
 #include "CGH/Types/CGHTypes.h"
 #include "CGH/Types/CGHSolverTypes.h"
+#include "CGH/Types/CGHReconstructionTypes.h"
 #include "GameFramework/Actor.h"
 #include "CGHWorkbenchActor.generated.h"
 
 class ACGHCameraActor;
+class ACGHObserverPlaneActor;
+class ACGHReconstructorActor;
 class ACGHReconstructionLightActor;
 class ACGHSLMActor;
 class ACGHSolverActor;
@@ -38,6 +41,10 @@ public:
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
 	TObjectPtr<ACGHReconstructionLightActor> ReconstructionLight;
 
+	/** Optional sampled destination for optical reconstruction. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
+	TObjectPtr<ACGHObserverPlaneActor> ObserverPlane;
+
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Scene")
 	TArray<TObjectPtr<ACGHTargetActor>> Targets;
 
@@ -58,6 +65,33 @@ public:
 
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Solver")
 	void CancelSolve();
+
+	/** Optional reconstruction coordinator; each coordinator belongs to one workbench. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Reconstruction")
+	TObjectPtr<ACGHReconstructorActor> Reconstructor;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Reconstruction")
+	ECGHReconstructionJobState ReconstructionJobState = ECGHReconstructionJobState::Idle;
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, NonTransactional, Category = "CGH|Reconstruction")
+	FString ReconstructionStatusMessage = TEXT("No reconstructor assigned.");
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction")
+	void Reconstruct();
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction")
+	void CancelReconstruction();
+
+	/** Game-thread metadata snapshot; phase samples are copied only when a job launches. */
+	bool CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError);
+
+	/** Kept separate from the solver's versioned scene/wire description. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Reconstruction")
+	FCGHObserverPlaneDescription ObserverPlaneDescription;
+
+	/** SLM and observer references are available in this world; not numerical validation. */
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Reconstruction")
+	bool bObserverPlaneDescriptionAvailable = false;
 
 	/** Derived SI data in the SLM's unscaled local coordinate system. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Scene")
@@ -99,9 +133,11 @@ protected:
 
 	void UpdateStatusLabel();
 	void UpdateSolverStatus();
+	void UpdateReconstructionStatus();
 
 private:
 	bool IsSceneActorAvailable(const AActor* Actor) const;
+	void UpdateReconstructionDescriptions(FCGHSLMDescription& OutSLM, FCGHReconstructionLightDescription& OutLight);
 	void RefreshSceneObservers();
 	void RemoveSceneObservers();
 	void OnSceneTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport);

@@ -9,7 +9,7 @@ class UArrowComponent;
 class USceneComponent;
 class UTextRenderComponent;
 
-/** Illumination data and direction marker for future optical reconstruction. */
+/** Illumination parameters consumed through the workbench by solvers and reconstructors. */
 UCLASS(Blueprintable)
 class CGHSIM_API ACGHReconstructionLightActor : public AActor
 {
