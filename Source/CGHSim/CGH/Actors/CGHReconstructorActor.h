@@ -5,6 +5,7 @@
 #include "GameFramework/Actor.h"
 #include "CGHReconstructorActor.generated.h"
 
+class ACGHCameraActor;
 class ACGHWorkbenchActor;
 class ACGHSLMActor;
 class ACGHReconstructionLightActor;
@@ -20,6 +21,7 @@ struct FCGHReconstructionSubmission
 	TWeakObjectPtr<ACGHSLMActor> SLM;
 	TWeakObjectPtr<ACGHReconstructionLightActor> Light;
 	TWeakObjectPtr<ACGHObserverPlaneActor> ObserverPlane;
+	TWeakObjectPtr<ACGHCameraActor> Camera;
 	uint64 PhaseRevision = 0;
 	uint64 FieldRevision = 0;
 };
@@ -37,7 +39,7 @@ public:
 	virtual void Destroyed() override;
 	virtual void BeginDestroy() override;
 
-	/** Supplies SLM phase, illumination, and the destination observer plane. */
+	/** Supplies SLM phase, illumination, and the selected observer plane or camera destination. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "CGH|Reconstruction")
 	TObjectPtr<ACGHWorkbenchActor> Workbench;
 
@@ -52,7 +54,7 @@ public:
 	ECGHReconstructionJobState JobState = ECGHReconstructionJobState::Idle;
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Reconstruction")
-	FString StatusMessage = TEXT("Ready to reconstruct the SLM phase onto an observer plane.");
+	FString StatusMessage = TEXT("Ready to reconstruct the SLM phase onto the selected destination.");
 
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Reconstruction")
 	int64 JobId = 0;
@@ -67,7 +69,7 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction")
 	void Reconstruct();
 
-	/** Saves this reconstructor's accepted result if it is still the active observer field. */
+	/** Saves this reconstructor's accepted result if it is still the active field on the selected destination. */
 	UFUNCTION(BlueprintCallable, Category = "CGH|Reconstruction|Save")
 	bool SaveReconstructedComplexField();
 
@@ -98,6 +100,8 @@ private:
 	bool bAcceptActiveResult = false;
 	bool bPolling = false;
 	TWeakObjectPtr<ACGHObserverPlaneActor> LastPublishedObserver;
+	TWeakObjectPtr<ACGHCameraActor> LastPublishedCamera;
+	ECGHReconstructionMode LastPublishedMode = ECGHReconstructionMode::ObserverPlane;
 	uint64 LastPublishedFieldRevision = 0;
 
 	bool CaptureSubmission(FCGHReconstructionSubmission& Out, FString& Error);

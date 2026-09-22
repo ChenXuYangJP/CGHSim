@@ -113,6 +113,32 @@ def parity(single, multiple):
     return batched, expected
 
 
+
+def inverse_r_parity(single, multiple):
+    odd = mixed_scene()
+    odd.algorithm, odd.width, odd.height = 3, 7, 5
+    even = copy.deepcopy(odd)
+    even.width, even.height = 8, 6
+    fixtures = [
+        ("inverse-r one pixel with more GPUs than pixels", Scene(width=1, height=1, algorithm=3)),
+        ("inverse-r odd aperture and posed mesh", odd),
+        ("inverse-r even aperture", even),
+    ]
+    for label, scene in fixtures:
+        expected = solve(single, scene, "single-GPU inverse-r oracle: " + label)
+        identical(computed(multiple, scene, label), expected, label)
+    batched = sampled_scene(513, 257, 513)
+    batched.algorithm = 3
+    # Change weight exponents in later contributor batches, exercising persisted
+    # max exponents and all three compensated states across launch boundaries.
+    for index, sample in enumerate(batched.targets[0].samples):
+        sample.amplitude *= 2.0 ** (3 * (index // 256))
+    expected = computed(single, batched, "single-GPU inverse-r tile/batch baseline")
+    identical(computed(multiple, batched, "multiple-GPU inverse-r tile/batch result"), expected,
+              "inverse-r pixel tiles, contributor batches and dynamic exponent rescaling")
+    return batched, expected
+
+
 def concurrent_isolation(single, multiple, batched, baseline):
     variants = []
     for index in range(4):
@@ -132,13 +158,14 @@ def concurrent_isolation(single, multiple, batched, baseline):
               "shared GPU state remains clean after concurrent jobs")
 
 
-def cancellation_isolation(single, multiple, batched, baseline):
+def cancellation_isolation(single, multiple, batched, baseline, algorithm=1):
     heavy = sampled_scene(1024, 512, 8192)
     # About 1.08 billion emitter/pixel interactions keep the survivor active
     # across the 20ms overlap window even with 64K pixel tiles. Assert below that
     # it has not sent a result before cancellation, rather than assuming overlap.
     survivor = sampled_scene(513, 257, 8193)
     survivor.incident_phase = 0.71
+    heavy.algorithm = survivor.algorithm = algorithm
     expected = computed(single, survivor, "cancellation survivor baseline")
     heavy_payload, survivor_payload = encode(heavy), encode(survivor)
     cancelled_identity, survivor_identity = next(IDENTITIES), next(IDENTITIES)
@@ -187,6 +214,9 @@ def main(executable):
         batched, expected = parity(single, multiple)
         concurrent_isolation(single, multiple, batched, expected)
         cancellation_isolation(single, multiple, batched, expected)
+        inverse_batched, inverse_expected = inverse_r_parity(single, multiple)
+        concurrent_isolation(single, multiple, inverse_batched, inverse_expected)
+        cancellation_isolation(single, multiple, inverse_batched, inverse_expected, algorithm=3)
     no_device(executable)
     print("Multi-GPU parity, partitioning, concurrency, cancellation and device-visibility checks passed", flush=True)
 

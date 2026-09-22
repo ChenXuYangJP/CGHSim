@@ -270,14 +270,17 @@ bool EncodeInput(const FWorkerContext& Context, std::vector<uint8_t>& Payload, F
 {
 	const FCGHReconstructionInput& Input = Context.Job.Input;
 	if (!CGHReconstruction::ValidateScene(Input, Error)) { return false; }
-	if (Input.Mode != ECGHReconstructionMode::ObserverPlane ||
+	if ((Input.Mode != ECGHReconstructionMode::ObserverPlane && Input.Mode != ECGHReconstructionMode::Camera) ||
 		Input.PropagationConvention != ECGHPropagationConvention::ExpPositiveIKR)
 	{
-		Error = TEXT("Docker protocol 1.2 requires Observer Plane reconstruction with exp(+i*k*r) propagation.");
+		Error = TEXT("Docker protocol 1.4 requires Observer Plane or Camera reconstruction with exp(+i*k*r) propagation.");
 		return false;
 	}
+	const bool bCamera = Input.Mode == ECGHReconstructionMode::Camera;
+	const int32 OutputX = bCamera ? Input.Camera.OutputResolutionX : Input.ObserverPlane.ResolutionX;
+	const int32 OutputY = bCamera ? Input.Camera.OutputResolutionY : Input.ObserverPlane.ResolutionY;
 	if (!Wire::ValidDimensions(static_cast<uint32>(Input.SLM.ResolutionX), static_cast<uint32>(Input.SLM.ResolutionY)) ||
-		!Wire::ValidReconstructionDimensions(static_cast<uint32>(Input.ObserverPlane.ResolutionX), static_cast<uint32>(Input.ObserverPlane.ResolutionY)) ||
+		!Wire::ValidReconstructionDimensions(static_cast<uint32>(OutputX), static_cast<uint32>(OutputY)) ||
 		Input.Pattern.ResolutionX != Input.SLM.ResolutionX || Input.Pattern.ResolutionY != Input.SLM.ResolutionY ||
 		Input.Pattern.PhaseRad.Num() != int64(Input.SLM.ResolutionX) * Input.SLM.ResolutionY)
 	{
@@ -326,7 +329,33 @@ bool EncodeInput(const FWorkerContext& Context, std::vector<uint8_t>& Payload, F
 		Request.phase_radians.push_back(Input.Pattern.PhaseRad[Index]);
 	}
 	std::string WireError;
-	if (!Wire::EncodeReconstructionRequest(Request, Payload, WireError, &Context.Job.bCancelRequested))
+	bool bEncoded = false;
+	if (bCamera)
+	{
+		Wire::CameraReconstructionRequest CameraRequest;
+		CameraRequest.slm = Request.slm;
+		CameraRequest.light = Request.light;
+		CameraRequest.phase_radians = std::move(Request.phase_radians);
+		const FCGHCameraDescription& Camera = Input.Camera;
+		auto& C = CameraRequest.camera;
+		C.optical_position_slm_m = ToWireVector(Camera.OpticalPositionSLMM);
+		C.optical_rotation_slm = {Camera.OpticalRotationSLM.X, Camera.OpticalRotationSLM.Y, Camera.OpticalRotationSLM.Z, Camera.OpticalRotationSLM.W};
+		C.focal_length_m = Camera.FocalLengthM;
+		C.f_number = Camera.FNumber;
+		C.focus_distance_m = Camera.FocusDistanceM;
+		C.output_resolution_x = static_cast<uint32>(Camera.OutputResolutionX);
+		C.output_resolution_y = static_cast<uint32>(Camera.OutputResolutionY);
+		C.pixel_pitch_x_m = Camera.PixelPitchXM;
+		C.pixel_pitch_y_m = Camera.PixelPitchYM;
+		C.pupil_resolution_x = static_cast<uint32>(Camera.PupilResolutionX);
+		C.pupil_resolution_y = static_cast<uint32>(Camera.PupilResolutionY);
+		bEncoded = Wire::EncodeCameraReconstructionRequest(CameraRequest, Payload, WireError, &Context.Job.bCancelRequested);
+	}
+	else
+	{
+		bEncoded = Wire::EncodeReconstructionRequest(Request, Payload, WireError, &Context.Job.bCancelRequested);
+	}
+	if (!bEncoded)
 	{
 		if (Context.Check(Error))
 		{
@@ -362,7 +391,12 @@ FCGHReconstructionResult RunJob(const FCGHReconstructionJob& Job, const FCGHDock
 	}
 	std::string WireError;
 	Wire::Header RequestHeader;
-	RequestHeader.type = Wire::Type::ReconstructionRequest;
+	const bool bCamera = Job.Input.Mode == ECGHReconstructionMode::Camera;
+	const Wire::Type ExpectedResultType = bCamera ? Wire::Type::CameraReconstructionResult : Wire::Type::ReconstructionResult;
+	const Wire::Status ExpectedStatus = bCamera ? Wire::Status::CameraReconstructionSuccess : Wire::Status::ReconstructionSuccess;
+	const int32 OutputX = bCamera ? Job.Input.Camera.OutputResolutionX : Job.Input.ObserverPlane.ResolutionX;
+	const int32 OutputY = bCamera ? Job.Input.Camera.OutputResolutionY : Job.Input.ObserverPlane.ResolutionY;
+	RequestHeader.type = bCamera ? Wire::Type::CameraReconstructionRequest : Wire::Type::ReconstructionRequest;
 	RequestHeader.request_id = RequestId;
 	RequestHeader.payload_size = RequestPayload.size();
 	std::vector<uint8_t> HeaderBytes;
@@ -395,13 +429,13 @@ FCGHReconstructionResult RunJob(const FCGHReconstructionJob& Job, const FCGHDock
 		return Failure(FString::Printf(TEXT("Docker reconstruction invalid response header: %s"), UTF8_TO_TCHAR(WireError.c_str())));
 	}
 	if (ResponseHeader.request_id != RequestId ||
-		(ResponseHeader.type != Wire::Type::ReconstructionResult && ResponseHeader.type != Wire::Type::Error))
+		(ResponseHeader.type != ExpectedResultType && ResponseHeader.type != Wire::Type::Error))
 	{
 		return Failure(TEXT("Docker reconstruction response job ID or message type does not match the request."));
 	}
-	const uint64 PixelCount = static_cast<uint64>(Job.Input.ObserverPlane.ResolutionX) * Job.Input.ObserverPlane.ResolutionY;
-	// 1.2 complex result: 32-byte metadata + two binary64 values per pixel. Reject before allocating.
-	if ((ResponseHeader.type == Wire::Type::ReconstructionResult && ResponseHeader.payload_size != 32 + PixelCount * 16) ||
+	const uint64 PixelCount = static_cast<uint64>(OutputX) * OutputY;
+	// 1.4 complex result: 32-byte metadata + two binary64 values per pixel. Reject before allocating.
+	if ((ResponseHeader.type == ExpectedResultType && ResponseHeader.payload_size != 32 + PixelCount * 16) ||
 		(ResponseHeader.type == Wire::Type::Error &&
 			(ResponseHeader.payload_size < 5 || ResponseHeader.payload_size > Wire::kMaxErrorBytes + 4)))
 	{
@@ -422,7 +456,26 @@ FCGHReconstructionResult RunJob(const FCGHReconstructionJob& Job, const FCGHDock
 		return Failure(FString::Printf(TEXT("Docker reconstruction server: %s"), UTF8_TO_TCHAR(ServerError.c_str())));
 	}
 	Wire::ReconstructionResult WireResult;
-	if (!Wire::DecodeReconstructionResult(ResponsePayload.data(), ResponsePayload.size(), WireResult, WireError, &Job.bCancelRequested))
+	bool bDecoded = false;
+	if (bCamera)
+	{
+		Wire::CameraReconstructionResult CameraResult;
+		bDecoded = Wire::DecodeCameraReconstructionResult(ResponsePayload.data(), ResponsePayload.size(), CameraResult, WireError, &Job.bCancelRequested);
+		if (bDecoded)
+		{
+			WireResult.status = CameraResult.status;
+			WireResult.convention = CameraResult.convention;
+			WireResult.resolution_x = CameraResult.resolution_x;
+			WireResult.resolution_y = CameraResult.resolution_y;
+			WireResult.compute_seconds = CameraResult.compute_seconds;
+			WireResult.samples = std::move(CameraResult.samples);
+		}
+	}
+	else
+	{
+		bDecoded = Wire::DecodeReconstructionResult(ResponsePayload.data(), ResponsePayload.size(), WireResult, WireError, &Job.bCancelRequested);
+	}
+	if (!bDecoded)
 	{
 		if (!Context.Check(Error))
 		{
@@ -431,10 +484,10 @@ FCGHReconstructionResult RunJob(const FCGHReconstructionJob& Job, const FCGHDock
 		return Failure(FString::Printf(TEXT("Docker reconstruction invalid result: %s"), UTF8_TO_TCHAR(WireError.c_str())));
 	}
 	std::vector<uint8_t>().swap(ResponsePayload);
-	if (WireResult.status != Wire::Status::ReconstructionSuccess ||
+	if (WireResult.status != ExpectedStatus ||
 		WireResult.convention != Wire::Convention::ExpPositiveIKR ||
-		WireResult.resolution_x != static_cast<uint32>(Job.Input.ObserverPlane.ResolutionX) ||
-		WireResult.resolution_y != static_cast<uint32>(Job.Input.ObserverPlane.ResolutionY) ||
+		WireResult.resolution_x != static_cast<uint32>(OutputX) ||
+		WireResult.resolution_y != static_cast<uint32>(OutputY) ||
 		WireResult.samples.size() != PixelCount)
 	{
 		return Failure(TEXT("Docker reconstruction result status, convention or dimensions do not match the input."));

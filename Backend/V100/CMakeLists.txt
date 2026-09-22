@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 # V100 compute capability; initialize before CUDA compiler detection.
 set(CMAKE_CUDA_ARCHITECTURES 70)
 project(CGHV100Backend
-    VERSION 1.2.0
+    VERSION 1.4.0
     LANGUAGES CXX CUDA
 )
 
@@ -46,11 +46,15 @@ if(BUILD_TESTING)
         set_tests_properties(cuda_point_focus PROPERTIES TIMEOUT 60)
         add_test(NAME cuda_reconstruction COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/reconstruction_integration.py $<TARGET_FILE:cgh_v100_server>)
         set_tests_properties(cuda_reconstruction PROPERTIES TIMEOUT 90)
+        add_test(NAME cuda_camera COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/camera_integration.py $<TARGET_FILE:cgh_v100_server>)
+        set_tests_properties(cuda_camera PROPERTIES TIMEOUT 120)
     endif()
     if(CGH_ENABLE_MULTI_GPU_TESTS)
         add_test(NAME cuda_multi_gpu COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/multi_gpu_integration.py $<TARGET_FILE:cgh_v100_server>)
         set_tests_properties(cuda_multi_gpu PROPERTIES TIMEOUT 90)
         add_test(NAME cuda_reconstruction_multi_gpu COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/reconstruction_multi_gpu.py $<TARGET_FILE:cgh_v100_server>)
         set_tests_properties(cuda_reconstruction_multi_gpu PROPERTIES TIMEOUT 120)
+        add_test(NAME cuda_camera_multi_gpu COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/camera_multi_gpu.py $<TARGET_FILE:cgh_v100_server>)
+        set_tests_properties(cuda_camera_multi_gpu PROPERTIES TIMEOUT 120)
     endif()
 endif()

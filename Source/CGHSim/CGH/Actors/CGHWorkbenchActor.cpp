@@ -107,33 +107,8 @@ void ACGHWorkbenchActor::UpdateSceneDescription()
 		return; // Without the reference frame there are no meaningful local positions.
 	}
 
-	const FTransform SLMTransform = SLM->GetActorTransform();
-	const auto LocalPositionMeters = [&SLMTransform](const FVector& WorldPosition)
-	{
-		// Preserve signed projections onto the SLM axes: +X is the optical normal.
-		// Points along that normal have X > 0; points behind its plane have X < 0.
-		return SLMTransform.InverseTransformPositionNoScale(WorldPosition) * CGHUnits::CmToM(1.0);
-	};
-	const auto LocalDirection = [&SLMTransform](const FVector& WorldDirection)
-	{
-		return SLMTransform.InverseTransformVectorNoScale(WorldDirection).GetSafeNormal();
-	};
-
 	const bool bHasCamera = IsSceneActorAvailable(Camera);
-	if (bHasCamera)
-	{
-		const FCGHCameraParameters& Parameters = Camera->Parameters;
-		const FTransform OpticalTransform = Camera->GetOpticalTransform();
-		Updated.Camera.OpticalPositionSLMM = LocalPositionMeters(OpticalTransform.GetLocation());
-		Updated.Camera.ForwardDirectionSLM = LocalDirection(OpticalTransform.GetUnitAxis(EAxis::X));
-		Updated.Camera.FocalLengthM = CGHUnits::MmToM(Parameters.FocalLengthMm);
-		Updated.Camera.FNumber = Parameters.FNumber;
-		Updated.Camera.FocusDistanceM = CGHUnits::MmToM(Parameters.FocusDistanceMm);
-		Updated.Camera.SensorWidthM = CGHUnits::MmToM(Parameters.SensorWidthMm);
-		Updated.Camera.SensorHeightM = CGHUnits::MmToM(Parameters.SensorHeightMm);
-		Updated.Camera.OutputResolutionX = Parameters.OutputResolutionX;
-		Updated.Camera.OutputResolutionY = Parameters.OutputResolutionY;
-	}
+	UpdateCameraDescription(Updated.Camera);
 
 	const bool bHasLight = IsSceneActorAvailable(ReconstructionLight);
 
@@ -220,7 +195,31 @@ void ACGHWorkbenchActor::UpdateReconstructionDescriptions(
 	}
 }
 
-bool ACGHWorkbenchActor::CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError)
+void ACGHWorkbenchActor::UpdateCameraDescription(FCGHCameraDescription& OutCamera) const
+{
+	OutCamera = FCGHCameraDescription();
+	if (!IsSceneActorAvailable(SLM) || !IsSceneActorAvailable(Camera)) return;
+	const FTransform SLMTransform = SLM->GetActorTransform();
+	const FTransform OpticalTransform = Camera->GetOpticalTransform();
+	const FCGHCameraParameters& Parameters = Camera->Parameters;
+	OutCamera.OpticalPositionSLMM = SLMTransform.InverseTransformPositionNoScale(OpticalTransform.GetLocation()) * CGHUnits::CmToM(1.0);
+	OutCamera.OpticalRotationSLM = SLMTransform.GetRotation().Inverse() * OpticalTransform.GetRotation();
+	OutCamera.ForwardDirectionSLM = OutCamera.OpticalRotationSLM.GetAxisX();
+	OutCamera.FocalLengthM = CGHUnits::MmToM(Parameters.FocalLengthMm);
+	OutCamera.FNumber = Parameters.FNumber;
+	OutCamera.FocusDistanceM = CGHUnits::MmToM(Parameters.FocusDistanceMm);
+	OutCamera.SensorWidthM = Camera->GetSensorWidthM();
+	OutCamera.SensorHeightM = Camera->GetSensorHeightM();
+	OutCamera.PixelPitchXM = Camera->GetSensorPixelPitchXM();
+	OutCamera.PixelPitchYM = Camera->GetSensorPixelPitchYM();
+	OutCamera.OutputResolutionX = Parameters.OutputResolutionX;
+	OutCamera.OutputResolutionY = Parameters.OutputResolutionY;
+	OutCamera.PupilResolutionX = Parameters.PupilResolutionX;
+	OutCamera.PupilResolutionY = Parameters.PupilResolutionY;
+}
+
+bool ACGHWorkbenchActor::CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError,
+	ECGHReconstructionMode Mode)
 {
 	OutInput = FCGHReconstructionInput();
 	OutError.Reset();
@@ -232,6 +231,11 @@ bool ACGHWorkbenchActor::CaptureReconstructionInput(FCGHReconstructionInput& Out
 	if (IsTemplate() || !GetWorld())
 	{
 		OutError = TEXT("Reconstruction requires a workbench in a world.");
+		return false;
+	}
+	if (Mode != ECGHReconstructionMode::ObserverPlane && Mode != ECGHReconstructionMode::Camera)
+	{
+		OutError = TEXT("Unknown reconstruction mode.");
 		return false;
 	}
 	const auto CheckActor = [this, &OutError](const AActor* Actor, const TCHAR* Name)
@@ -254,19 +258,39 @@ bool ACGHWorkbenchActor::CaptureReconstructionInput(FCGHReconstructionInput& Out
 		}
 		return true;
 	};
-	if (!CheckActor(SLM, TEXT("SLM")) || !CheckActor(ReconstructionLight, TEXT("Reconstruction light"))
-		|| !CheckActor(ObserverPlane, TEXT("Observer plane")))
+	if (!CheckActor(SLM, TEXT("SLM")) || !CheckActor(ReconstructionLight, TEXT("Reconstruction light"))) return false;
+	if (Mode == ECGHReconstructionMode::ObserverPlane)
 	{
-		return false;
+		if (!CheckActor(ObserverPlane, TEXT("Observer plane"))) return false;
+	}
+	else
+	{
+		if (!CheckActor(Camera, TEXT("Camera"))) return false;
+		if (!IsValid(Camera->GetOpticalReference()))
+		{
+			OutError = TEXT("Camera requires an available optical reference component.");
+			return false;
+		}
+		const FTransform OpticalTransform = Camera->GetOpticalTransform();
+		if (OpticalTransform.ContainsNaN() || !OpticalTransform.GetRotation().IsNormalized()
+			|| !OpticalTransform.GetScale3D().Equals(FVector::OneVector, KINDA_SMALL_NUMBER))
+		{
+			OutError = TEXT("Camera optical reference requires a finite normalized pose and world scale (1, 1, 1).");
+			return false;
+		}
 	}
 
-	// Reconstruction needs only optical metadata. Do not rebuild target meshes/clouds
-	// or require a camera merely to capture or compare a reconstruction request.
+	// Capture only optical metadata; target meshes/clouds and the unused destination are not required.
 	UpdateReconstructionDescriptions(SceneDescription.SLM, SceneDescription.ReconstructionLight);
 	OutInput.SLM = SceneDescription.SLM;
 	OutInput.Light = SceneDescription.ReconstructionLight;
-	OutInput.ObserverPlane = ObserverPlaneDescription;
-	OutInput.Mode = ECGHReconstructionMode::ObserverPlane;
+	if (Mode == ECGHReconstructionMode::ObserverPlane) OutInput.ObserverPlane = ObserverPlaneDescription;
+	else
+	{
+		UpdateCameraDescription(SceneDescription.Camera);
+		OutInput.Camera = SceneDescription.Camera;
+	}
+	OutInput.Mode = Mode;
 	return true;
 }
 
@@ -444,8 +468,10 @@ bool ACGHWorkbenchActor::ValidateScene()
 		CheckPositive(Parameters.FocalLengthMm, TEXT("Camera focal length (mm)"));
 		CheckPositive(Parameters.FNumber, TEXT("Camera f-number"));
 		CheckPositive(Parameters.FocusDistanceMm, TEXT("Camera focus distance (mm)"));
-		CheckPositive(Parameters.SensorWidthMm, TEXT("Camera sensor width (mm)"));
-		CheckPositive(Parameters.SensorHeightMm, TEXT("Camera sensor height (mm)"));
+		CheckPositive(Camera->GetSensorWidthM(), TEXT("Camera sensor width (m)"));
+		CheckPositive(Camera->GetSensorHeightM(), TEXT("Camera sensor height (m)"));
+		CheckPositive(Camera->GetSensorPixelPitchXM(), TEXT("Camera sensor pixel pitch X (m)"));
+		CheckPositive(Camera->GetSensorPixelPitchYM(), TEXT("Camera sensor pixel pitch Y (m)"));
 		Check(Parameters.OutputResolutionX > 0 && Parameters.OutputResolutionY > 0,
 			TEXT("Camera output resolutions must both be greater than zero."));
 	}

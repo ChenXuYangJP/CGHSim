@@ -1,8 +1,10 @@
 # CGHSim development handoff and plan
 
-Last updated: **2026-09-21**
+Last updated: **2026-09-22**
 
-Milestone: **CPU complex superposition for multiple Point and Mesh targets**
+Current milestone: **CPU/CUDA observer and thin-lens camera reconstruction, plus selectable PointFocus amplitude modes**
+
+The detailed scaffold/handoff sections below retain the **2026-09-21 historical baseline**. Current behavior and validation supersede their former unimplemented-feature notes: [camera reconstruction](CGH_Camera_Reconstruction.md), [observer reconstruction](CGH_Reconstruction.md), [PointFocus modes](CGH_PointFocus_Solver.md), and [CGHV 1.4 Docker backend](CGH_Docker_Backend.md). Camera sensor resolution/pitch now affect a computed complex field; focal length, aperture, focus distance, and full lens pose are used on CPU and CUDA. Preview/save/load are available on both output actors.
 
 Environment verified for this milestone: Ubuntu, installed Unreal Engine **5.8.2**, Linux Development targets.
 

@@ -17,6 +17,7 @@ namespace
 		double Phase;
 		double WeightedReal = 0.0;
 		double WeightedImaginary = 0.0;
+		int AmplitudeExponent = 0;
 	};
 
 	struct FAperture
@@ -39,6 +40,7 @@ namespace
 			Correction += std::abs(Sum) >= std::abs(Value) ? (Sum - Next) + Value : (Value - Next) + Sum;
 			Sum = Next;
 		}
+		void Scale(double Factor) { Sum *= Factor; Correction *= Factor; }
 		double Value() const { return Sum + Correction; }
 	};
 
@@ -115,9 +117,9 @@ namespace
 		{
 			return Fail(Error, TEXT("PointFocus requires scene schema version 2."));
 		}
-		if (Input.Algorithm != ECGHSolverAlgorithm::PointFocus)
+		if (Input.Algorithm != ECGHSolverAlgorithm::PointFocus && Input.Algorithm != ECGHSolverAlgorithm::PointFocusInverseR)
 		{
-			return Fail(Error, TEXT("The CPU backend supports only the PointFocus algorithm."));
+			return Fail(Error, TEXT("The CPU backend supports PointFocus and PointFocusInverseR algorithms."));
 		}
 		if (Input.PropagationConvention != ECGHPropagationConvention::ExpPositiveIKR)
 		{
@@ -375,6 +377,7 @@ FCGHSolverResult CGHPointFocus::Solve(const FCGHSolverInput& Input, const std::a
 	{
 		return Failed(MoveTemp(Result.Error));
 	}
+	const bool bInverseDistance = Input.Algorithm == ECGHSolverAlgorithm::PointFocusInverseR;
 	FCompensatedSum WeightSum;
 	for (int32 Index = 0; Index < Emitters.Num(); ++Index)
 	{
@@ -383,10 +386,20 @@ FCGHSolverResult CGHPointFocus::Solve(const FCGHSolverInput& Input, const std::a
 			return Failed(TEXT("PointFocus job cancelled."));
 		}
 		FEmitter& Emitter = Emitters[Index];
-		Emitter.Amplitude /= MaximumAmplitude;
-		Emitter.WeightedReal = Emitter.Amplitude * std::cos(Emitter.Phase);
-		Emitter.WeightedImaginary = Emitter.Amplitude * std::sin(Emitter.Phase);
-		WeightSum.Add(Emitter.Amplitude);
+		if (bInverseDistance)
+		{
+			// Preserve raw amplitude exponents: normalizing first can underflow values that a small r restores.
+			Emitter.Amplitude = std::frexp(Emitter.Amplitude, &Emitter.AmplitudeExponent);
+			Emitter.WeightedReal = std::cos(Emitter.Phase);
+			Emitter.WeightedImaginary = std::sin(Emitter.Phase);
+		}
+		else
+		{
+			Emitter.Amplitude /= MaximumAmplitude;
+			Emitter.WeightedReal = Emitter.Amplitude * std::cos(Emitter.Phase);
+			Emitter.WeightedImaginary = Emitter.Amplitude * std::sin(Emitter.Phase);
+			WeightSum.Add(Emitter.Amplitude);
+		}
 	}
 	const double ZeroFieldThreshold = CancellationTolerance * WeightSum.Value();
 	const FCGHSLMDescription& SLM = Input.Scene.SLM;
@@ -413,7 +426,59 @@ FCGHSolverResult CGHPointFocus::Solve(const FCGHSolverInput& Input, const std::a
 				// Preserve the reference single-focus result and avoid unnecessary trigonometric work.
 				const FEmitter& Emitter = Emitters[0];
 				const double R = std::hypot(Emitter.Position.X, Emitter.Position.Y - Yp, Emitter.Position.Z - Zp);
+				if (bInverseDistance && !IsPositiveFinite(R))
+				{
+					return Failed(TEXT("Inverse-distance PointFocus requires finite positive emitter-to-pixel distances."));
+				}
 				Phase = Emitter.Phase - Aperture.K * R - IncidentPhase;
+			}
+			else if (bInverseDistance)
+			{
+				FCompensatedSum Real;
+				FCompensatedSum Imaginary;
+				FCompensatedSum PixelWeights;
+				int MaximumWeightExponent = 0;
+				for (int32 Index = 0; Index < Emitters.Num(); ++Index)
+				{
+					if ((Index & 255) == 0 && CancelRequested.load(std::memory_order_relaxed))
+					{
+						return Failed(TEXT("PointFocus job cancelled."));
+					}
+					const FEmitter& Emitter = Emitters[Index];
+					const double R = std::hypot(Emitter.Position.X, Emitter.Position.Y - Yp, Emitter.Position.Z - Zp);
+					if (!IsPositiveFinite(R))
+					{
+						return Failed(TEXT("Inverse-distance PointFocus requires finite positive emitter-to-pixel distances."));
+					}
+					int DistanceExponent;
+					const double DistanceMantissa = std::frexp(R, &DistanceExponent);
+					const int WeightExponent = Emitter.AmplitudeExponent - DistanceExponent;
+					if (Index == 0) { MaximumWeightExponent = WeightExponent; }
+					else if (WeightExponent > MaximumWeightExponent)
+					{
+						const double Scale = std::ldexp(1.0, MaximumWeightExponent - WeightExponent);
+						Real.Scale(Scale);
+						Imaginary.Scale(Scale);
+						PixelWeights.Scale(Scale);
+						MaximumWeightExponent = WeightExponent;
+					}
+					// Common per-pixel power-of-two scale keeps A/r finite while retaining relative contributions.
+					const double Weight = std::ldexp(Emitter.Amplitude / DistanceMantissa, WeightExponent - MaximumWeightExponent);
+					const double PropagationPhase = Aperture.K * R;
+					const double C = std::cos(PropagationPhase);
+					const double S = std::sin(PropagationPhase);
+					Real.Add(Weight * (Emitter.WeightedReal * C + Emitter.WeightedImaginary * S));
+					Imaginary.Add(Weight * (Emitter.WeightedImaginary * C - Emitter.WeightedReal * S));
+					PixelWeights.Add(Weight);
+				}
+				const double FieldReal = Real.Value();
+				const double FieldImaginary = Imaginary.Value();
+				if (!std::isfinite(FieldReal) || !std::isfinite(FieldImaginary))
+				{
+					return Failed(TEXT("PointFocus encountered a nonfinite complex field."));
+				}
+				Phase = std::hypot(FieldReal, FieldImaginary) <= CancellationTolerance * PixelWeights.Value()
+					? 0.0 : std::atan2(FieldImaginary, FieldReal) - IncidentPhase;
 			}
 			else
 			{

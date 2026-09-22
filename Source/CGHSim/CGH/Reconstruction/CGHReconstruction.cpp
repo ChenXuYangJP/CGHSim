@@ -92,6 +92,137 @@ namespace
 		Correction = (Next - Sum) - Adjusted;
 		Sum = Next;
 	}
+	/** Build the pupil in SLM coordinates and the sensor in an abstract propagation frame.
+	 * Camera +X looks into the scene; physical light travels toward camera -X.
+	 * In stage two, abstract +X follows that propagation while Y/Z retain sensor axes. */
+	bool BuildCameraGeometry(const FCGHReconstructionInput& Input,
+		FCGHObserverPlaneDescription& Pupil, FCGHObserverPlaneDescription& Sensor, FString& OutError)
+	{
+		const FCGHCameraDescription& Camera = Input.Camera;
+		if (!FMath::IsFinite(Camera.FocalLengthM) || Camera.FocalLengthM <= 0.0
+			|| !FMath::IsFinite(Camera.FNumber) || Camera.FNumber <= 0.0
+			|| !FMath::IsFinite(Camera.FocusDistanceM) || Camera.FocusDistanceM <= Camera.FocalLengthM)
+		{
+			return Fail(OutError, TEXT("Camera requires a finite positive focal length and f-number, and focus distance greater than focal length."));
+		}
+		if (Camera.PupilResolutionX < 1 || Camera.PupilResolutionY < 1
+			|| Camera.PupilResolutionX > 2048 || Camera.PupilResolutionY > 2048)
+		{
+			return Fail(OutError, TEXT("Camera pupil sampling requires 1 to 2048 samples per axis."));
+		}
+		const double Diameter = Camera.FocalLengthM / Camera.FNumber;
+		const double SensorDistance = Camera.FocalLengthM / (1.0 - Camera.FocalLengthM / Camera.FocusDistanceM);
+		if (!FMath::IsFinite(Diameter) || Diameter <= 0.0 || !FMath::IsFinite(SensorDistance) || SensorDistance <= 0.0)
+		{
+			return Fail(OutError, TEXT("Camera aperture diameter and lens-to-sensor distance must be finite and positive."));
+		}
+		Pupil.ResolutionX = Camera.PupilResolutionX;
+		Pupil.ResolutionY = Camera.PupilResolutionY;
+		Pupil.PixelPitchXM = Diameter / Camera.PupilResolutionX;
+		Pupil.PixelPitchYM = Diameter / Camera.PupilResolutionY;
+		Pupil.PositionSLMM = Camera.OpticalPositionSLMM;
+		Pupil.RotationSLM = Camera.OpticalRotationSLM;
+		Sensor.ResolutionX = Camera.OutputResolutionX;
+		Sensor.ResolutionY = Camera.OutputResolutionY;
+		Sensor.PixelPitchXM = Camera.PixelPitchXM;
+		Sensor.PixelPitchYM = Camera.PixelPitchYM;
+		Sensor.PositionSLMM = FVector(SensorDistance, 0.0, 0.0);
+		Sensor.RotationSLM = FQuat::Identity;
+
+		// Reuse observer geometry/light validation without copying the phase buffer.
+		FCGHReconstructionInput Stage;
+		Stage.SLM = Input.SLM;
+		Stage.Light = Input.Light;
+		Stage.PropagationConvention = Input.PropagationConvention;
+		Stage.ObserverPlane = Pupil;
+		if (!CGHReconstruction::ValidateScene(Stage, OutError))
+		{
+			OutError = TEXT("Camera pupil: ") + OutError;
+			return false;
+		}
+		const FVector Forward = Camera.OpticalRotationSLM.RotateVector(FVector::XAxisVector);
+		for (int32 Row : {0, Input.SLM.ResolutionY - 1})
+		{
+			for (int32 Column : {0, Input.SLM.ResolutionX - 1})
+			{
+				const FVector P(0.0, (Column - (Input.SLM.ResolutionX - 1) / 2.0) * Input.SLM.PixelPitchXM,
+					((Input.SLM.ResolutionY - 1) / 2.0 - Row) * Input.SLM.PixelPitchYM);
+				const double FrontDistance = FVector::DotProduct(P - Camera.OpticalPositionSLMM, Forward);
+				if (!FMath::IsFinite(FrontDistance) || FrontDistance <= 0.0)
+				{
+					return Fail(OutError, TEXT("Camera optical +X must face the SLM; every SLM pixel must lie in front of the lens."));
+				}
+			}
+		}
+		const double K = ReconstructionTwoPi / Input.Light.WavelengthM;
+		const double HalfY = (Pupil.ResolutionX - 1) / 2.0 * Pupil.PixelPitchXM;
+		const double HalfZ = (Pupil.ResolutionY - 1) / 2.0 * Pupil.PixelPitchYM;
+		const double MaximumLensPhase = -0.5 * K * (HalfY * (HalfY / Camera.FocalLengthM) + HalfZ * (HalfZ / Camera.FocalLengthM));
+		if (!FMath::IsFinite(MaximumLensPhase))
+		{
+			return Fail(OutError, TEXT("Camera thin-lens phase exceeds the finite numerical range."));
+		}
+		Stage.SLM.ResolutionX = Pupil.ResolutionX;
+		Stage.SLM.ResolutionY = Pupil.ResolutionY;
+		Stage.SLM.PixelPitchXM = Pupil.PixelPitchXM;
+		Stage.SLM.PixelPitchYM = Pupil.PixelPitchYM;
+		Stage.ObserverPlane = Sensor;
+		if (!CGHReconstruction::ValidateScene(Stage, OutError))
+		{
+			OutError = TEXT("Camera sensor: ") + OutError;
+			return false;
+		}
+		return true;
+	}
+
+	bool PropagateSamples(const TArray<FIncidentSample>& Sources, double K, double AreaOverTwoPi,
+		const FCGHObserverPlaneDescription& Plane, FCGHComplexField& OutField,
+		const std::atomic<bool>& CancelRequested, FString& OutError)
+	{
+		OutField.ResolutionX = Plane.ResolutionX;
+		OutField.ResolutionY = Plane.ResolutionY;
+		OutField.Samples.SetNumUninitialized(Plane.ResolutionX * Plane.ResolutionY);
+		for (int32 Index = 0; Index < OutField.Samples.Num(); ++Index)
+		{
+			if (CancelRequested.load(std::memory_order_relaxed))
+			{
+				return Fail(OutError, TEXT("Reconstruction was cancelled."));
+			}
+			const FVector Q = ObserverPixel(Plane, Index % Plane.ResolutionX, Index / Plane.ResolutionX);
+			double Real = 0.0, Imaginary = 0.0, RealCorrection = 0.0, ImaginaryCorrection = 0.0;
+			for (int32 SourceIndex = 0; SourceIndex < Sources.Num(); ++SourceIndex)
+			{
+				if ((SourceIndex & 255) == 0 && CancelRequested.load(std::memory_order_relaxed))
+				{
+					return Fail(OutError, TEXT("Reconstruction was cancelled."));
+				}
+				const FIncidentSample& Source = Sources[SourceIndex];
+				const double R = std::hypot(Q.X, Q.Y - Source.Y, Q.Z - Source.Z);
+				const double Phase = K * R;
+				const double Base = AreaOverTwoPi * (Q.X / R) / R;
+				const double Near = Base / R;
+				const double Far = Base * K;
+				if (!FMath::IsFinite(Phase) || !FMath::IsFinite(Near) || !FMath::IsFinite(Far))
+				{
+					return Fail(OutError, TEXT("Diffraction kernel exceeds the finite numerical range; increase observer distance or adjust optical settings."));
+				}
+				const double Cos = std::cos(Phase);
+				const double Sin = std::sin(Phase);
+				const double KernelReal = Near * Cos + Far * Sin;
+				const double KernelImaginary = Near * Sin - Far * Cos;
+				AddCompensated(Source.Real * KernelReal - Source.Imaginary * KernelImaginary, Real, RealCorrection);
+				AddCompensated(Source.Real * KernelImaginary + Source.Imaginary * KernelReal, Imaginary, ImaginaryCorrection);
+			}
+			if (!FMath::IsFinite(Real) || !FMath::IsFinite(Imaginary))
+			{
+				return Fail(OutError, TEXT("Reconstructed complex field exceeds the finite numerical range."));
+			}
+			OutField.Samples[Index].Real = Real;
+			OutField.Samples[Index].Imaginary = Imaginary;
+		}
+		return true;
+	}
+
 }
 
 } // namespace CGHReconstruction
@@ -99,9 +230,14 @@ namespace
 bool CGHReconstruction::ValidateScene(const FCGHReconstructionInput& Input, FString& OutError)
 {
 	OutError.Reset();
+	if (Input.Mode == ECGHReconstructionMode::Camera)
+	{
+		FCGHObserverPlaneDescription Pupil, Sensor;
+		return BuildCameraGeometry(Input, Pupil, Sensor, OutError);
+	}
 	if (Input.Mode != ECGHReconstructionMode::ObserverPlane)
 	{
-		return Fail(OutError, TEXT("Camera reconstruction is not implemented; select Observer Plane mode."));
+		return Fail(OutError, TEXT("Unknown reconstruction mode."));
 	}
 	if (Input.PropagationConvention != ECGHPropagationConvention::ExpPositiveIKR)
 	{
@@ -258,46 +394,49 @@ FCGHReconstructionResult CGHReconstruction::Reconstruct(const FCGHReconstruction
 		Source.Real = Amplitude * std::cos(Phase);
 		Source.Imaginary = Amplitude * std::sin(Phase);
 	}
-	Result.Field.ResolutionX = Plane.ResolutionX;
-	Result.Field.ResolutionY = Plane.ResolutionY;
-	Result.Field.Samples.SetNumUninitialized(Plane.ResolutionX * Plane.ResolutionY);
-	for (int32 Index = 0; Index < Result.Field.Samples.Num(); ++Index)
+	FCGHObserverPlaneDescription Pupil;
+	FCGHObserverPlaneDescription Sensor;
+	if (Input.Mode == ECGHReconstructionMode::Camera)
 	{
-		if (CancelRequested.load(std::memory_order_relaxed))
+		if (!BuildCameraGeometry(Input, Pupil, Sensor, ValidationError)) return Failed(*ValidationError);
+		FCGHComplexField PupilField;
+		if (!PropagateSamples(Sources, K, AreaOverTwoPi, Pupil, PupilField, CancelRequested, ValidationError))
 		{
-			return Failed(TEXT("Reconstruction was cancelled."));
+			return Failed(*ValidationError);
 		}
-		const FVector Q = ObserverPixel(Plane, Index % Plane.ResolutionX, Index / Plane.ResolutionX);
-		double Real = 0.0, Imaginary = 0.0, RealCorrection = 0.0, ImaginaryCorrection = 0.0;
-		for (int32 SourceIndex = 0; SourceIndex < Sources.Num(); ++SourceIndex)
+		Sources.Empty(); // Release the SLM source storage before constructing pupil sources.
+		const double Diameter = Input.Camera.FocalLengthM / Input.Camera.FNumber;
+		for (int32 Index = 0; Index < PupilField.Samples.Num(); ++Index)
 		{
-			if ((SourceIndex & 255) == 0 && CancelRequested.load(std::memory_order_relaxed))
+			if ((Index & 255) == 0 && CancelRequested.load(std::memory_order_relaxed))
 			{
 				return Failed(TEXT("Reconstruction was cancelled."));
 			}
-			const FIncidentSample& Source = Sources[SourceIndex];
-			const double R = std::hypot(Q.X, Q.Y - Source.Y, Q.Z - Source.Z);
-			const double Phase = K * R;
-			const double Base = AreaOverTwoPi * (Q.X / R) / R;
-			const double Near = Base / R;
-			const double Far = Base * K;
-			if (!FMath::IsFinite(Phase) || !FMath::IsFinite(Near) || !FMath::IsFinite(Far))
+			const double Y = (Index % Pupil.ResolutionX - (Pupil.ResolutionX - 1) / 2.0) * Pupil.PixelPitchXM;
+			const double Z = ((Pupil.ResolutionY - 1) / 2.0 - Index / Pupil.ResolutionX) * Pupil.PixelPitchYM;
+			const double NormalizedY = 2.0 * (Y / Diameter);
+			const double NormalizedZ = 2.0 * (Z / Diameter);
+			if (NormalizedY * NormalizedY + NormalizedZ * NormalizedZ > 1.0) continue;
+			const double LensPhase = -0.5 * K * (Y * (Y / Input.Camera.FocalLengthM) + Z * (Z / Input.Camera.FocalLengthM));
+			if (!FMath::IsFinite(LensPhase)) return Failed(TEXT("Camera thin-lens phase exceeds the finite numerical range."));
+			const double C = std::cos(LensPhase);
+			const double S = std::sin(LensPhase);
+			const FCGHComplexSample& Sample = PupilField.Samples[Index];
+			const double Real = Sample.Real * C - Sample.Imaginary * S;
+			const double Imaginary = Sample.Real * S + Sample.Imaginary * C;
+			if (!FMath::IsFinite(Real) || !FMath::IsFinite(Imaginary))
 			{
-				return Failed(TEXT("Diffraction kernel exceeds the finite numerical range; increase observer distance or adjust optical settings."));
+				return Failed(TEXT("Camera pupil field exceeds the finite numerical range."));
 			}
-			const double Cos = std::cos(Phase);
-			const double Sin = std::sin(Phase);
-			const double KernelReal = Near * Cos + Far * Sin;
-			const double KernelImaginary = Near * Sin - Far * Cos;
-			AddCompensated(Source.Real * KernelReal - Source.Imaginary * KernelImaginary, Real, RealCorrection);
-			AddCompensated(Source.Real * KernelImaginary + Source.Imaginary * KernelReal, Imaginary, ImaginaryCorrection);
+			Sources.Add({Y, Z, Real, Imaginary});
 		}
-		if (!FMath::IsFinite(Real) || !FMath::IsFinite(Imaginary))
-		{
-			return Failed(TEXT("Reconstructed complex field exceeds the finite numerical range."));
-		}
-		Result.Field.Samples[Index].Real = Real;
-		Result.Field.Samples[Index].Imaginary = Imaginary;
+		PupilField.Samples.Empty();
+		if (!PropagateSamples(Sources, K, (Pupil.PixelPitchXM * Pupil.PixelPitchYM) / ReconstructionTwoPi,
+			Sensor, Result.Field, CancelRequested, ValidationError)) return Failed(*ValidationError);
+	}
+	else if (!PropagateSamples(Sources, K, AreaOverTwoPi, Plane, Result.Field, CancelRequested, ValidationError))
+	{
+		return Failed(*ValidationError);
 	}
 	if (CancelRequested.load(std::memory_order_relaxed))
 	{

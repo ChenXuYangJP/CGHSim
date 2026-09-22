@@ -19,9 +19,11 @@ namespace CGHPointFocus
 	 * phi_slm = wrap_[0,2*pi)(arg(F) - light_initial_phase - k*dot(DirectionSLM,P)).
 	 * Pixel centers use the canonical SLM-local X=0, columns +Y, rows -Z convention.
 	 * Mesh samples are transformed by target rigid pose; scale and target amplitude/phase are
-	 * already baked into each sample. No 1/r attenuation or sample-count normalization is used.
-	 * Positive amplitudes are normalized by their global maximum before compensated complex sums.
-	 * At |F| <= 32*double_epsilon*sum(normalized amplitudes), final SLM phase is exactly zero.
+	 * already baked into each sample. PointFocus uses a_j=A_j, while PointFocusInverseR uses a_j=A_j/r_j.
+	 * Neither mode divides amplitudes by the sample count. PointFocus normalizes positive amplitudes
+	 * by their global maximum; PointFocusInverseR uses a common per-pixel power-of-two scaling of A_j/r_j
+	 * to avoid overflow/underflow without dropping amplitudes before distance weighting. Both use compensated sums.
+	 * At |F| <= 32*double_epsilon*sum(scaled weights), final SLM phase is exactly zero.
 	 * A single positive emitter retains the original analytical target_phase-k*r-incident phase.
 	 * Plane-wave position is ignored; finite nonnegative light amplitude and finite polarization
 	 * are validated but do not alter scalar phase. Direction/mesh quaternion squared-norm tolerance: 1e-6.

@@ -7,7 +7,7 @@
 
 class UTexture2D;
 
-/** Native selected-actor inset showing the observer's complex field. Stripped when cooking. */
+/** Native selected-actor inset showing an observer or camera sensor complex field. Stripped when cooking. */
 UCLASS(ClassGroup = CGH)
 class CGHSIM_API UCGHObserverPreviewComponent : public UActorComponent
 {

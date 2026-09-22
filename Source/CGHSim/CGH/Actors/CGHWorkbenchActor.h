@@ -83,7 +83,8 @@ public:
 	void CancelReconstruction();
 
 	/** Game-thread metadata snapshot; phase samples are copied only when a job launches. */
-	bool CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError);
+	bool CaptureReconstructionInput(FCGHReconstructionInput& OutInput, FString& OutError,
+		ECGHReconstructionMode Mode = ECGHReconstructionMode::ObserverPlane);
 
 	/** Kept separate from the solver's versioned scene/wire description. */
 	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, Category = "CGH|Reconstruction")
@@ -138,6 +139,7 @@ protected:
 private:
 	bool IsSceneActorAvailable(const AActor* Actor) const;
 	void UpdateReconstructionDescriptions(FCGHSLMDescription& OutSLM, FCGHReconstructionLightDescription& OutLight);
+	void UpdateCameraDescription(FCGHCameraDescription& OutCamera) const;
 	void RefreshSceneObservers();
 	void RemoveSceneObservers();
 	void OnSceneTransformUpdated(USceneComponent* Component, EUpdateTransformFlags Flags, ETeleportType Teleport);

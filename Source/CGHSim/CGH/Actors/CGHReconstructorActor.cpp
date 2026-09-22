@@ -1,6 +1,7 @@
 #include "CGH/Actors/CGHReconstructorActor.h"
 
 #include "CGH/Actors/CGHWorkbenchActor.h"
+#include "CGH/Actors/CGHCameraActor.h"
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Actors/CGHObserverPlaneActor.h"
@@ -21,9 +22,9 @@ ACGHReconstructorActor::ACGHReconstructorActor()
 bool ACGHReconstructorActor::CaptureSubmission(FCGHReconstructionSubmission& Out, FString& Error)
 {
 	Out = FCGHReconstructionSubmission();
-	if (Parameters.Mode != ECGHReconstructionMode::ObserverPlane)
+	if (Parameters.Mode != ECGHReconstructionMode::ObserverPlane && Parameters.Mode != ECGHReconstructionMode::Camera)
 	{
-		Error = TEXT("Camera reconstruction is not implemented. Select Observer Plane mode.");
+		Error = TEXT("Unknown reconstruction mode.");
 		return false;
 	}
 	if (!IsValid(Workbench) || Workbench->IsActorBeingDestroyed() || Workbench->GetWorld() != GetWorld())
@@ -31,7 +32,7 @@ bool ACGHReconstructorActor::CaptureSubmission(FCGHReconstructionSubmission& Out
 		Error = TEXT("Assign a valid Workbench in the reconstructor's world.");
 		return false;
 	}
-	if (!Workbench->CaptureReconstructionInput(Out.Input, Error))
+	if (!Workbench->CaptureReconstructionInput(Out.Input, Error, Parameters.Mode))
 	{
 		return false;
 	}
@@ -41,22 +42,31 @@ bool ACGHReconstructorActor::CaptureSubmission(FCGHReconstructionSubmission& Out
 		Error = TEXT("The SLM needs a valid phase pattern. Generate or load a pattern before reconstruction.");
 		return false;
 	}
-	Workbench->ObserverPlane->SynchronizeComplexField();
 	Out.Input.Mode = Parameters.Mode;
 	Out.Input.PropagationConvention = ECGHPropagationConvention::ExpPositiveIKR;
 	Out.Parameters = Parameters;
 	Out.Workbench = Workbench;
 	Out.SLM = Workbench->SLM;
 	Out.Light = Workbench->ReconstructionLight;
-	Out.ObserverPlane = Workbench->ObserverPlane;
 	Out.PhaseRevision = Workbench->SLM->GetPhasePatternRevision();
-	Out.FieldRevision = Workbench->ObserverPlane->GetComplexFieldRevision();
+	if (Parameters.Mode == ECGHReconstructionMode::Camera)
+	{
+		Workbench->Camera->SynchronizeComplexField();
+		Out.Camera = Workbench->Camera;
+		Out.FieldRevision = Workbench->Camera->GetComplexFieldRevision();
+	}
+	else
+	{
+		Workbench->ObserverPlane->SynchronizeComplexField();
+		Out.ObserverPlane = Workbench->ObserverPlane;
+		Out.FieldRevision = Workbench->ObserverPlane->GetComplexFieldRevision();
+	}
 	return CGHReconstruction::ValidateScene(Out.Input, Error);
 }
 
 bool ACGHReconstructorActor::SameInputs(const FCGHReconstructionSubmission& A, const FCGHReconstructionSubmission& B)
 {
-	if (A.Workbench != B.Workbench || A.SLM != B.SLM || A.Light != B.Light || A.ObserverPlane != B.ObserverPlane
+	if (A.Workbench != B.Workbench || A.SLM != B.SLM || A.Light != B.Light || A.ObserverPlane != B.ObserverPlane || A.Camera != B.Camera
 		|| A.Parameters.ReconstructionBackend != B.Parameters.ReconstructionBackend || A.Parameters.Mode != B.Parameters.Mode
 		|| A.PhaseRevision != B.PhaseRevision)
 	{
@@ -83,8 +93,23 @@ bool ACGHReconstructorActor::SameInputs(const FCGHReconstructionSubmission& A, c
 	if (SX.ResolutionX != SY.ResolutionX || SX.ResolutionY != SY.ResolutionY
 		|| SX.PixelPitchXM != SY.PixelPitchXM || SX.PixelPitchYM != SY.PixelPitchYM || SX.ModulationType != SY.ModulationType
 		|| LX.SourceType != LY.SourceType || LX.WavelengthM != LY.WavelengthM
-		|| LX.Amplitude != LY.Amplitude || LX.InitialPhaseRad != LY.InitialPhaseRad
-		|| OX.ResolutionX != OY.ResolutionX || OX.ResolutionY != OY.ResolutionY
+		|| LX.Amplitude != LY.Amplitude || LX.InitialPhaseRad != LY.InitialPhaseRad)
+	{
+		return false;
+	}
+	if (A.Parameters.Mode == ECGHReconstructionMode::Camera)
+	{
+		const FCGHCameraDescription& CX = A.Input.Camera;
+		const FCGHCameraDescription& CY = B.Input.Camera;
+		if (CX.OpticalPositionSLMM != CY.OpticalPositionSLMM || !CX.OpticalRotationSLM.Equals(CY.OpticalRotationSLM, 0.0)
+			|| CX.ForwardDirectionSLM != CY.ForwardDirectionSLM || CX.FocalLengthM != CY.FocalLengthM
+			|| CX.FNumber != CY.FNumber || CX.FocusDistanceM != CY.FocusDistanceM
+			|| CX.SensorWidthM != CY.SensorWidthM || CX.SensorHeightM != CY.SensorHeightM
+			|| CX.OutputResolutionX != CY.OutputResolutionX || CX.OutputResolutionY != CY.OutputResolutionY
+			|| CX.PixelPitchXM != CY.PixelPitchXM || CX.PixelPitchYM != CY.PixelPitchYM
+			|| CX.PupilResolutionX != CY.PupilResolutionX || CX.PupilResolutionY != CY.PupilResolutionY) return false;
+	}
+	else if (OX.ResolutionX != OY.ResolutionX || OX.ResolutionY != OY.ResolutionY
 		|| OX.PixelPitchXM != OY.PixelPitchXM || OX.PixelPitchYM != OY.PixelPitchYM
 		|| OX.PositionSLMM != OY.PositionSLMM || !OX.RotationSLM.Equals(OY.RotationSLM, 0.0))
 	{
@@ -160,9 +185,28 @@ bool ACGHReconstructorActor::SaveReconstructedComplexField()
 		FieldSaveStatus = TEXT("Wait for a reconstructed complex field to reach Ready before saving.");
 		return false;
 	}
-	ACGHObserverPlaneActor* Observer = LastPublishedObserver.Get();
 	if (!IsValid(Workbench) || Workbench->IsActorBeingDestroyed() || Workbench->GetWorld() != GetWorld()
-		|| !IsValid(Observer) || Observer->IsActorBeingDestroyed() || Observer->GetWorld() != GetWorld()
+		|| Parameters.Mode != LastPublishedMode)
+	{
+		FieldSaveStatus = TEXT("The selected destination no longer matches the accepted reconstruction. Reconstruct again.");
+		return false;
+	}
+	if (LastPublishedMode == ECGHReconstructionMode::Camera)
+	{
+		ACGHCameraActor* Camera = LastPublishedCamera.Get();
+		if (!IsValid(Camera) || Camera->IsActorBeingDestroyed() || Camera->GetWorld() != GetWorld()
+			|| Workbench->Camera != Camera || !Camera->HasValidComplexField()
+			|| Camera->GetComplexFieldRevision() != LastPublishedFieldRevision)
+		{
+			FieldSaveStatus = TEXT("The reconstructed result is no longer the active camera field. Reconstruct again, or save the current field from the camera.");
+			return false;
+		}
+		const bool bSaved = Camera->SaveCurrentComplexField();
+		FieldSaveStatus = Camera->FieldSaveStatus;
+		return bSaved;
+	}
+	ACGHObserverPlaneActor* Observer = LastPublishedObserver.Get();
+	if (!IsValid(Observer) || Observer->IsActorBeingDestroyed() || Observer->GetWorld() != GetWorld()
 		|| Workbench->ObserverPlane != Observer || !Observer->HasValidComplexField()
 		|| Observer->GetComplexFieldRevision() != LastPublishedFieldRevision)
 	{
@@ -187,7 +231,7 @@ void ACGHReconstructorActor::SubmitPending()
 	if (!CaptureSubmission(Current, Error) || !SameInputs(Current, PendingSubmission.GetValue())
 		|| Current.FieldRevision != PendingSubmission->FieldRevision)
 	{
-		FailRequest(Error.IsEmpty() ? TEXT("Queued inputs or observer field changed; reconstruct again.") : Error);
+		FailRequest(Error.IsEmpty() ? TEXT("Queued inputs or destination field changed; reconstruct again.") : Error);
 		return;
 	}
 	if (PendingSubmission->Parameters.ReconstructionBackend == ECGHReconstructionBackend::Docker)
@@ -233,7 +277,7 @@ void ACGHReconstructorActor::PollReconstructor()
 			if (!CaptureSubmission(Current, Error) || !ActiveSubmission.IsSet()
 				|| !SameInputs(Current, ActiveSubmission.GetValue()) || Current.FieldRevision != ActiveSubmission->FieldRevision)
 			{
-				FailRequest(Error.IsEmpty() ? TEXT("Result discarded: optical inputs, Docker settings, SLM phase, or observer field changed during reconstruction.") : Error);
+				FailRequest(Error.IsEmpty() ? TEXT("Result discarded: optical inputs, Docker settings, SLM phase, or destination field changed during reconstruction.") : Error);
 			}
 			else if (ActiveJob->Result.PropagationConvention != ActiveSubmission->Input.PropagationConvention)
 			{
@@ -243,17 +287,23 @@ void ACGHReconstructorActor::PollReconstructor()
 			{
 				FailRequest(ActiveJob->Result.Error);
 			}
-			else if (Current.ObserverPlane->SetComplexField(MoveTemp(ActiveJob->Result.Field)))
-			{
-				LastComputeSeconds = ActiveJob->Result.ComputeSeconds;
-				LastPublishedObserver = Current.ObserverPlane;
-				LastPublishedFieldRevision = Current.ObserverPlane->GetComplexFieldRevision();
-				JobState = ECGHReconstructionJobState::Ready;
-				StatusMessage = TEXT("Complex optical field published to the observer plane. Select the plane to preview phase, amplitude, or intensity.");
-			}
 			else
 			{
-				FailRequest(TEXT("The observer plane rejected the reconstructed field."));
+				const bool bCamera = Current.Parameters.Mode == ECGHReconstructionMode::Camera;
+				const bool bPublished = bCamera ? Current.Camera->SetComplexField(MoveTemp(ActiveJob->Result.Field))
+					: Current.ObserverPlane->SetComplexField(MoveTemp(ActiveJob->Result.Field));
+				if (bPublished)
+				{
+					LastComputeSeconds = ActiveJob->Result.ComputeSeconds;
+					LastPublishedObserver = Current.ObserverPlane;
+					LastPublishedCamera = Current.Camera;
+					LastPublishedMode = Current.Parameters.Mode;
+					LastPublishedFieldRevision = bCamera ? Current.Camera->GetComplexFieldRevision() : Current.ObserverPlane->GetComplexFieldRevision();
+					JobState = ECGHReconstructionJobState::Ready;
+					StatusMessage = bCamera ? TEXT("Complex optical field published to the camera sensor. Select the camera to preview phase, amplitude, or intensity.")
+						: TEXT("Complex optical field published to the observer plane. Select the plane to preview phase, amplitude, or intensity.");
+				}
+				else FailRequest(TEXT("The selected destination rejected the reconstructed field."));
 			}
 		}
 		ActiveJob.Reset();
@@ -298,7 +348,7 @@ void ACGHReconstructorActor::CancelReconstruction()
 	PendingSubmission.Reset();
 	bAcceptActiveResult = false;
 	JobState = ECGHReconstructionJobState::Idle;
-	StatusMessage = TEXT("Cancelled; the last published observer field is retained.");
+	StatusMessage = TEXT("Cancelled; the last published complex field is retained.");
 }
 
 void ACGHReconstructorActor::StopJobs()
@@ -313,10 +363,12 @@ void ACGHReconstructorActor::StopJobs()
 	PendingSubmission.Reset();
 	LastAttempt.Reset();
 	LastPublishedObserver.Reset();
+	LastPublishedCamera.Reset();
+	LastPublishedMode = ECGHReconstructionMode::ObserverPlane;
 	LastPublishedFieldRevision = 0;
 	bAcceptActiveResult = false;
 	JobState = ECGHReconstructionJobState::Idle;
-	StatusMessage = TEXT("Reconstructor stopped; the last published observer field is retained.");
+	StatusMessage = TEXT("Reconstructor stopped; the last published complex field is retained.");
 }
 
 void ACGHReconstructorActor::Tick(float DeltaSeconds)

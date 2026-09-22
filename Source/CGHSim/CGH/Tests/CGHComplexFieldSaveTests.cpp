@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "CGH/Actors/CGHObserverPlaneActor.h"
+#include "CGH/Actors/CGHCameraActor.h"
 #include "CGH/Actors/CGHReconstructorActor.h"
 #include "CGH/Actors/CGHReconstructionLightActor.h"
 #include "CGH/Actors/CGHSLMActor.h"
@@ -385,11 +386,109 @@ bool FCGHReconstructorComplexFieldSaveTest::RunTest(const FString& Parameters)
 	Reconstructor->CancelReconstruction();
 	TestFalse(TEXT("A cancelled job cannot save retained previous output"), Reconstructor->SaveReconstructedComplexField());
 	if (!Reconstructor->StartReconstruction() || !WaitReady()) return false;
-	Reconstructor->Parameters.Mode = ECGHReconstructionMode::Camera;
-	TestFalse(TEXT("Unsupported camera request fails"), Reconstructor->StartReconstruction());
+	Reconstructor->Parameters.Mode = static_cast<ECGHReconstructionMode>(255);
+	TestFalse(TEXT("Unknown reconstruction request fails"), Reconstructor->StartReconstruction());
 	TestFalse(TEXT("A failed job cannot save retained previous output"), Reconstructor->SaveReconstructedComplexField());
 	TestEqual(TEXT("Rejected saves leave the original six output files intact"), Files.FileCount(), 6);
 	Scene.ForwardErrorMessages(this);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHCameraReconstructorSaveTest,
+	"CGH.ComplexFieldSave.CameraReconstructorPublicationGuards", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHCameraReconstructorSaveTest::RunTest(const FString& Parameters)
+{
+	FComplexFieldSaveFiles Files;
+	FTestWorldWrapper Scene;
+	if (!Scene.CreateTestWorld(EWorldType::Editor)) { Scene.ForwardErrorMessages(this); return false; }
+	UWorld* World = Scene.GetTestWorld();
+	ACGHSLMActor* SLM = World->SpawnActor<ACGHSLMActor>();
+	ACGHReconstructionLightActor* Light = World->SpawnActor<ACGHReconstructionLightActor>();
+	ACGHCameraActor* Camera = World->SpawnActor<ACGHCameraActor>();
+	ACGHWorkbenchActor* Workbench = World->SpawnActor<ACGHWorkbenchActor>();
+	ACGHReconstructorActor* Reconstructor = World->SpawnActor<ACGHReconstructorActor>();
+	if (!SLM || !Light || !Camera || !Workbench || !Reconstructor) return false;
+	SLM->Parameters.ResolutionX = 2;
+	SLM->Parameters.ResolutionY = 2;
+	SLM->GeneratePreviewPhaseRamp();
+	Camera->Parameters.OutputResolutionX = 3;
+	Camera->Parameters.OutputResolutionY = 2;
+	Camera->Parameters.SensorSampling = ECGHCameraSensorSampling::PixelPitch;
+	Camera->Parameters.PixelPitchXUm = 8.0;
+	Camera->Parameters.PixelPitchYUm = 9.0;
+	Camera->Parameters.FocalLengthMm = 50.0;
+	Camera->Parameters.FocusDistanceMm = 400.0;
+	Camera->Parameters.FNumber = 100.0;
+	Camera->Parameters.PupilResolutionX = 4;
+	Camera->Parameters.PupilResolutionY = 4;
+	Camera->SetActorLocationAndRotation(FVector(40.0, 0.0, 0.0), FRotator(0.0, 180.0, 0.0));
+	Camera->FieldAssetSaveFolder.Path = Files.AssetFolder;
+	Camera->FieldRawSaveDirectory.Path = Files.RawFolder;
+	Workbench->SLM = SLM;
+	Workbench->ReconstructionLight = Light;
+	Workbench->Camera = Camera;
+	Workbench->Reconstructor = Reconstructor;
+	Reconstructor->Workbench = Workbench;
+	Reconstructor->Parameters.Mode = ECGHReconstructionMode::Camera;
+	const auto WaitReady = [&]()
+	{
+		const double Deadline = FPlatformTime::Seconds() + 5.0;
+		do
+		{
+			Reconstructor->PollReconstructor();
+			if (Reconstructor->JobState != ECGHReconstructionJobState::Queued && Reconstructor->JobState != ECGHReconstructionJobState::Running)
+				return TestTrue(*Reconstructor->StatusMessage, Reconstructor->JobState == ECGHReconstructionJobState::Ready);
+			FPlatformProcess::Sleep(0.001f);
+		} while (FPlatformTime::Seconds() < Deadline);
+		Reconstructor->CancelReconstruction();
+		AddError(TEXT("Timed out waiting for camera reconstruction save fixture."));
+		return false;
+	};
+	TestFalse(TEXT("Unpublished camera cannot be saved through the reconstructor"), Reconstructor->SaveReconstructedComplexField());
+	if (!TestTrue(TEXT("Camera reconstruction starts without observer"), Reconstructor->StartReconstruction())) return false;
+	TestFalse(TEXT("An active camera job cannot save"), Reconstructor->SaveReconstructedComplexField());
+	if (!WaitReady()) return false;
+	const FCGHComplexField Before = Camera->GetComplexField();
+	const FCGHComplexSample* Storage = Camera->GetComplexField().Samples.GetData();
+	const int64 JobId = Reconstructor->JobId;
+	TestEqual(TEXT("Camera publication does not autosave"), Files.FileCount(), 0);
+	if (!TestTrue(TEXT("Reconstructor delegates accepted camera save"), Reconstructor->SaveReconstructedComplexField())) { AddError(Reconstructor->FieldSaveStatus); return false; }
+	Files.AssetPaths.Add(Camera->LastSavedFieldAsset.ToSoftObjectPath().ToString());
+	TestEqual(TEXT("Camera save emits asset, binary, metadata and all three PNGs"), Files.FileCount(), 6);
+	TestEqual(TEXT("Camera save status propagates to reconstructor"), Reconstructor->FieldSaveStatus, Camera->FieldSaveStatus);
+	TArray<uint8> Raw;
+	TestTrue(TEXT("Camera complex export is readable"), FFileHelper::LoadFileToArray(Raw, *Camera->LastSavedFieldBinaryFile));
+	TestTrue(TEXT("Saved camera result preserves exact complex samples"), Raw == FieldSaveExpectedBytes(Before));
+	TestEqual(TEXT("Saving preserves camera publication revision"), Camera->GetComplexFieldRevision(), Before.Revision);
+	TestEqual(TEXT("Saving does not queue another camera job"), Reconstructor->JobId, JobId);
+	TestTrue(TEXT("Saving retains camera sample allocation"), Camera->GetComplexField().Samples.GetData() == Storage);
+	Reconstructor->Parameters.Mode = ECGHReconstructionMode::ObserverPlane;
+	TestFalse(TEXT("Switching destination mode invalidates camera save selection"), Reconstructor->SaveReconstructedComplexField());
+	Reconstructor->Parameters.Mode = ECGHReconstructionMode::Camera;
+	Workbench->Camera = nullptr;
+	TestFalse(TEXT("Missing camera reference blocks delegated save"), Reconstructor->SaveReconstructedComplexField());
+	ACGHCameraActor* Replacement = World->SpawnActor<ACGHCameraActor>();
+	if (!TestNotNull(TEXT("Replacement camera exists"), Replacement)) return false;
+	Replacement->Parameters = Camera->Parameters;
+	Replacement->SetComplexField(Before);
+	Workbench->Camera = Replacement;
+	TestFalse(TEXT("Identical data on another camera is not the accepted destination"), Reconstructor->SaveReconstructedComplexField());
+	Workbench->Camera = Camera;
+	Camera->FieldRawSaveDirectory.Path.Reset();
+	TestFalse(TEXT("Camera save failures propagate"), Reconstructor->SaveReconstructedComplexField());
+	TestEqual(TEXT("Delegated camera errors remain actionable"), Reconstructor->FieldSaveStatus, Camera->FieldSaveStatus);
+	Camera->FieldRawSaveDirectory.Path = Files.RawFolder;
+	FCGHComplexField Changed = Before;
+	Changed.Samples[0].Real += 1.0;
+	Camera->SetComplexField(Changed);
+	TestFalse(TEXT("External camera field replacement invalidates ownership"), Reconstructor->SaveReconstructedComplexField());
+	Camera->ClearComplexField();
+	TestFalse(TEXT("Cleared camera cannot save a previous publication"), Reconstructor->SaveReconstructedComplexField());
+	if (!Reconstructor->StartReconstruction() || !WaitReady() || !Reconstructor->StartReconstruction()) return false;
+	Reconstructor->CancelReconstruction();
+	TestFalse(TEXT("Cancelled camera job cannot save retained output"), Reconstructor->SaveReconstructedComplexField());
+	TestEqual(TEXT("Rejected saves create no additional outputs"), Files.FileCount(), 6);
 	return true;
 }
 

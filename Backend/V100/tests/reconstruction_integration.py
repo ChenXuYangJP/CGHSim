@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CGHV 1.2 CUDA observer reconstruction versus an independent complex oracle.
+"""CGHV 1.4 CUDA observer reconstruction versus an independent complex oracle.
 
 Requires real CUDA hardware; no missing-device skip or CPU/dummy fallback.
 Pass an executable to test owned-process cancellation and no-device failures, or

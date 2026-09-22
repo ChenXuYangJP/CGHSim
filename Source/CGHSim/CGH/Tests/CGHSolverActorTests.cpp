@@ -6,6 +6,7 @@
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHTargetActor.h"
 #include "CGH/Actors/CGHWorkbenchActor.h"
+#include "CGH/Solver/CGHPointFocus.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
@@ -1047,6 +1048,54 @@ bool FCGHSolverMeshAutoRefreshTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	TestTrue(TEXT("Restoring the mesh resumes automatic solving"), Scene.Solver->JobId > FailedJob);
+	Scene.ForwardErrorMessages(this);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHSolverAlgorithmSwitchTest,
+	"CGH.SolverActor.InverseDistanceModeSwitchRejectsStaleAndResubmits",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHSolverAlgorithmSwitchTest::RunTest(const FString& Parameters)
+{
+	FCGHSolverTestScene Scene;
+	if (!Scene.Initialize(*this) || !Scene.PublishSentinel(*this)) return false;
+	ACGHTargetActor* Second = Scene.GetTestWorld()->SpawnActor<ACGHTargetActor>();
+	if (!TestNotNull(TEXT("Second focus target spawns"), Second)) return false;
+	Second->SetActorLocation(Scene.SLM->GetActorTransform().TransformPositionNoScale(FVector(85.0, -3.0, 4.0)));
+	Second->Parameters.Amplitude = 0.55;
+	Second->Parameters.InitialPhaseRad = 1.2;
+	Scene.Workbench->Targets.Add(Second);
+	const uint64 Before = Scene.SLM->GetPhasePatternRevision();
+	TestTrue(TEXT("Original mode starts before algorithm edit"), Scene.Solver->StartSolve());
+	Scene.Solver->Parameters.Algorithm = ECGHSolverAlgorithm::PointFocusInverseR;
+	if (!WaitForCGHSolver(*this, *Scene.Solver)) return false;
+	TestTrue(TEXT("Algorithm edit rejects the obsolete mode's result"), Scene.Solver->JobState == ECGHSolverJobState::Failed);
+	TestEqual(TEXT("Stale algorithm result leaves previous SLM phase intact"), Scene.SLM->GetPhasePatternRevision(), Before);
+	Scene.Solver->bAutoSolve = true;
+	for (const ECGHSolverAlgorithm Algorithm : {ECGHSolverAlgorithm::PointFocusInverseR, ECGHSolverAlgorithm::PointFocus})
+	{
+		const int64 BeforeJob = Scene.Solver->JobId;
+		Scene.Solver->Parameters.Algorithm = Algorithm;
+		Scene.Solver->PollSolver();
+		if (!WaitForCGHSolver(*this, *Scene.Solver)) return false;
+		TestTrue(TEXT("Algorithm edits automatically request a fresh solve"), Scene.Solver->JobId > BeforeJob);
+		if (!TestTrue(TEXT("The selected algorithm reaches Ready"), Scene.Solver->JobState == ECGHSolverJobState::Ready)) return false;
+		Scene.Workbench->UpdateSceneDescription();
+		FCGHSolverInput Input;
+		Input.Scene = Scene.Workbench->SceneDescription;
+		Input.Algorithm = Algorithm;
+		const std::atomic<bool> Cancel{false};
+		const FCGHSolverResult Reference = CGHPointFocus::Solve(Input, Cancel);
+		TestTrue(TEXT("Actor publication follows the selected CPU algorithm"), Reference.bSucceeded && Scene.SLM->GetPhasePattern().PhaseRad == Reference.Pattern.PhaseRad);
+		if (Algorithm == ECGHSolverAlgorithm::PointFocusInverseR)
+		{
+			TestTrue(TEXT("Publication status identifies inverse-distance weighting"), Scene.Solver->StatusMessage.Contains(TEXT("1/r")));
+		}
+		const int64 ReadyJob = Scene.Solver->JobId;
+		Scene.Solver->PollSolver();
+		TestEqual(TEXT("Unchanged algorithm does not submit repeatedly"), Scene.Solver->JobId, ReadyJob);
+	}
 	Scene.ForwardErrorMessages(this);
 	return true;
 }

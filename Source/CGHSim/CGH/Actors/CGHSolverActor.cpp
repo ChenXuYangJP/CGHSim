@@ -245,7 +245,9 @@ bool ACGHSolverActor::StartSolve()
 	JobState = ECGHSolverJobState::Queued;
 	StatusMessage = Parameters.SolverBackend == ECGHSolverBackend::Docker
 		? TEXT("Docker TCP solver request queued.")
-		: TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r)).");
+		: (Parameters.Algorithm == ECGHSolverAlgorithm::PointFocusInverseR
+			? TEXT("PointFocus with 1/r amplitude weighting queued (propagation exp(+i k r)).")
+			: TEXT("PointFocus complex-field superposition queued (propagation exp(+i k r))."));
 	// A replaced worker is reaped before another starts, bounding large output buffers.
 	if (!ActiveJob)
 	{
@@ -375,6 +377,12 @@ void ACGHSolverActor::PollSolver()
 							? TEXT("Docker TCP dummy phase published to SLM; this is a transport test, not an optical solution.")
 							: TEXT("CUDA PointFocus complex-field phase received over TCP and published to SLM (exp(+i k r))."))
 						: TEXT("PointFocus complex-field phase published with plane-wave illumination compensation (exp(+i k r)).");
+					if (ActiveSubmission->Parameters.Algorithm == ECGHSolverAlgorithm::PointFocusInverseR && !ActiveJob->Result.bIsDummy)
+					{
+						StatusMessage = ActiveSubmission->Parameters.SolverBackend == ECGHSolverBackend::Docker
+							? TEXT("CUDA PointFocus with 1/r amplitude weighting received over TCP and published to SLM (exp(+i k r)).")
+							: TEXT("PointFocus with 1/r amplitude weighting published with plane-wave illumination compensation (exp(+i k r)).");
+					}
 				}
 				else
 				{

@@ -17,7 +17,9 @@ UENUM(BlueprintType)
 enum class ECGHSolverAlgorithm : uint8
 {
 	/** Complex-field superposition of point targets and mesh point-cloud samples. */
-	PointFocus
+	PointFocus,
+	/** Complex-field superposition with each point or mesh sample amplitude weighted by inverse distance. */
+	PointFocusInverseR UMETA(DisplayName = "Point Focus (1/r Amplitude)")
 };
 
 UENUM(BlueprintType)

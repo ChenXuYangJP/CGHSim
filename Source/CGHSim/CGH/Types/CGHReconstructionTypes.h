@@ -17,7 +17,7 @@ UENUM(BlueprintType)
 enum class ECGHReconstructionMode : uint8
 {
 	ObserverPlane,
-	Camera UMETA(DisplayName = "Camera (Not Implemented)")
+	Camera UMETA(DisplayName = "Camera (Thin Lens)")
 };
 
 UENUM(BlueprintType)
@@ -51,6 +51,7 @@ struct CGHSIM_API FCGHReconstructionInput
 	FCGHSLMDescription SLM;
 	FCGHReconstructionLightDescription Light;
 	FCGHObserverPlaneDescription ObserverPlane;
+	FCGHCameraDescription Camera;
 	FCGHSLMPhasePattern Pattern;
 	ECGHReconstructionMode Mode = ECGHReconstructionMode::ObserverPlane;
 	ECGHPropagationConvention PropagationConvention = ECGHPropagationConvention::ExpPositiveIKR;

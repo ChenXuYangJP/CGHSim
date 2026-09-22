@@ -269,10 +269,10 @@ bool EncodeInput(const FWorkerContext& Context, std::vector<uint8_t>& Payload, F
 {
 	const FCGHSolverInput& Input = Context.Job.Input;
 	const FCGHSceneDescription& Scene = Input.Scene;
-	if (Input.Algorithm != ECGHSolverAlgorithm::PointFocus ||
+	if ((Input.Algorithm != ECGHSolverAlgorithm::PointFocus && Input.Algorithm != ECGHSolverAlgorithm::PointFocusInverseR) ||
 		Input.PropagationConvention != ECGHPropagationConvention::ExpPositiveIKR)
 	{
-		Error = TEXT("Docker protocol 1.2 does not support this algorithm or propagation convention.");
+		Error = TEXT("Docker protocol 1.4 does not support this algorithm or propagation convention.");
 		return false;
 	}
 	if (Scene.SchemaVersion != 2 || Scene.SLM.ResolutionX < 1 || Scene.SLM.ResolutionY < 1 ||
@@ -290,7 +290,12 @@ bool EncodeInput(const FWorkerContext& Context, std::vector<uint8_t>& Payload, F
 	}
 	Wire::Request Request;
 	Request.scene_schema_version = static_cast<uint32>(Scene.SchemaVersion);
-	Request.algorithm = Wire::Algorithm::PointFocus;
+	switch (Input.Algorithm)
+	{
+	case ECGHSolverAlgorithm::PointFocus: Request.algorithm = Wire::Algorithm::PointFocus; break;
+	case ECGHSolverAlgorithm::PointFocusInverseR: Request.algorithm = Wire::Algorithm::PointFocusInverseR; break;
+	default: Error = TEXT("Docker solver input has an unsupported algorithm."); return false;
+	}
 	Request.convention = Wire::Convention::ExpPositiveIKR;
 	Request.slm.resolution_x = static_cast<uint32>(Scene.SLM.ResolutionX);
 	Request.slm.resolution_y = static_cast<uint32>(Scene.SLM.ResolutionY);
@@ -461,7 +466,7 @@ FCGHSolverResult RunJob(const FCGHSolverJob& Job, const FCGHDockerSolverSettings
 		return Failure(TEXT("Docker solver response job ID or message type does not match the request."));
 	}
 	const uint64 PixelCount = static_cast<uint64>(Job.Input.Scene.SLM.ResolutionX) * Job.Input.Scene.SLM.ResolutionY;
-	// 1.2 PointFocus result: fixed 32-byte metadata + one binary64 per pixel. Reject before allocating.
+	// 1.4 PointFocus result: fixed 32-byte metadata + one binary64 per pixel. Reject before allocating.
 	if ((ResponseHeader.type == Wire::Type::Result && ResponseHeader.payload_size != 32 + PixelCount * 8) ||
 		(ResponseHeader.type == Wire::Type::Error &&
 			(ResponseHeader.payload_size < 5 || ResponseHeader.payload_size > Wire::kMaxErrorBytes + 4)))
@@ -492,6 +497,12 @@ FCGHSolverResult RunJob(const FCGHSolverJob& Job, const FCGHDockerSolverSettings
 		return Failure(FString::Printf(TEXT("Docker solver invalid result: %s"), UTF8_TO_TCHAR(WireError.c_str())));
 	}
 	std::vector<uint8_t>().swap(ResponsePayload);
+	const Wire::Status ExpectedStatus = Job.Input.Algorithm == ECGHSolverAlgorithm::PointFocusInverseR
+		? Wire::Status::PointFocusInverseRSuccess : Wire::Status::PointFocusSuccess;
+	if (WireResult.status != Wire::Status::DummySuccess && WireResult.status != ExpectedStatus)
+	{
+		return Failure(TEXT("Docker solver numerical result status does not match the requested algorithm."));
+	}
 	if (WireResult.convention != Wire::Convention::ExpPositiveIKR ||
 		WireResult.resolution_x != static_cast<uint32>(Job.Input.Scene.SLM.ResolutionX) ||
 		WireResult.resolution_y != static_cast<uint32>(Job.Input.Scene.SLM.ResolutionY) ||

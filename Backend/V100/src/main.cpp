@@ -131,8 +131,9 @@ void HandleClient(int fd, Settings settings) {
     if (!wire::DecodeHeader(header_bytes, sizeof(header_bytes), header, error)) {
         SendError(fd, header.request_id, error, settings); return;
     }
-    if (header.type != wire::Type::Request && header.type != wire::Type::ReconstructionRequest) {
-        SendError(fd, header.request_id, "First frame must be Request or ReconstructionRequest", settings); return;
+    if (header.type != wire::Type::Request && header.type != wire::Type::ReconstructionRequest &&
+        header.type != wire::Type::CameraReconstructionRequest) {
+        SendError(fd, header.request_id, "First frame must be a solver, observer or camera reconstruction request", settings); return;
     }
     // Receive incrementally; a header alone cannot force a 256 MiB allocation.
     std::vector<std::uint8_t> payload;
@@ -145,9 +146,13 @@ void HandleClient(int fd, Settings settings) {
     CancellationMonitor monitor(fd, header.request_id);
     const auto cancelled = [&monitor] { return monitor.requested.load(std::memory_order_relaxed); };
     const bool reconstructing = header.type == wire::Type::ReconstructionRequest;
+    const bool camera_reconstructing = header.type == wire::Type::CameraReconstructionRequest;
     wire::Request request;
     wire::ReconstructionRequest reconstruction_request;
-    const bool decoded = reconstructing
+    wire::CameraReconstructionRequest camera_request;
+    const bool decoded = camera_reconstructing
+        ? wire::DecodeCameraReconstructionRequest(payload.data(), payload.size(), camera_request, error, &monitor.requested)
+        : reconstructing
         ? wire::DecodeReconstructionRequest(payload.data(), payload.size(), reconstruction_request, error, &monitor.requested)
         : wire::DecodeRequest(payload.data(), payload.size(), request, error, &monitor.requested);
     if (!decoded) {
@@ -155,8 +160,8 @@ void HandleClient(int fd, Settings settings) {
         SendError(fd, header.request_id, error, settings); return;
     }
     std::vector<std::uint8_t>().swap(payload);
-    if (reconstructing && settings.dummy) {
-        if (!cancelled()) SendError(fd, header.request_id, "Observer-plane reconstruction requires --solver cuda; the dummy fixture does not reconstruct fields", settings);
+    if ((reconstructing || camera_reconstructing) && settings.dummy) {
+        if (!cancelled()) SendError(fd, header.request_id, "Optical reconstruction requires --solver cuda; the dummy fixture does not reconstruct fields", settings);
         return;
     }
     const auto delay_end = Clock::now() + std::chrono::milliseconds(settings.delay_ms);
@@ -167,7 +172,11 @@ void HandleClient(int fd, Settings settings) {
     }
     if (cancelled()) return;
     bool encoded = false;
-    if (reconstructing) {
+    if (camera_reconstructing) {
+        wire::CameraReconstructionResult result;
+        if (cgh::reconstruction::CudaReconstruction::Solve(camera_request, result, error, monitor.requested) && !cancelled())
+            encoded = wire::EncodeCameraReconstructionResult(result, payload, error, &monitor.requested);
+    } else if (reconstructing) {
         wire::ReconstructionResult result;
         if (cgh::reconstruction::CudaReconstruction::Solve(reconstruction_request, result, error, monitor.requested) && !cancelled())
             encoded = wire::EncodeReconstructionResult(result, payload, error, &monitor.requested);
@@ -183,7 +192,8 @@ void HandleClient(int fd, Settings settings) {
         SendError(fd, header.request_id, error, settings);
         return;
     }
-    SendFrame(fd, reconstructing ? wire::Type::ReconstructionResult : wire::Type::Result, header.request_id, payload,
+    SendFrame(fd, camera_reconstructing ? wire::Type::CameraReconstructionResult :
+        reconstructing ? wire::Type::ReconstructionResult : wire::Type::Result, header.request_id, payload,
         Clock::now() + std::chrono::milliseconds(settings.io_timeout_ms), &monitor.requested);
 }
 
@@ -202,7 +212,7 @@ int main(int argc, char** argv) {
         const std::string option = argv[i];
         if (option == "--help") {
             std::cout << "cgh_v100_server [--port 7000] [--solver cuda|dummy] [--delay-ms 0] [--io-timeout-ms 30000] [--max-clients 8]\n"
-                         "CGHV 1.2 CUDA PointFocus solver and observer-plane reconstruction; --solver dummy enables only the solver transport fixture.\n";
+                         "CGHV 1.4 CUDA PointFocus/PointFocusInverseR solvers and observer-plane/thin-lens camera reconstruction; --solver dummy enables only the solver transport fixture.\n";
             return 0;
         }
         if (option == "--solver") {

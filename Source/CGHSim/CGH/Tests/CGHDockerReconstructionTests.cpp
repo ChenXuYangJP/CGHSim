@@ -117,7 +117,7 @@ namespace
 		Actor.CancelReconstruction();
 		return false;
 	}
-	/** Independent CGHV 1.2 bytes expose decoder errors that a shared encoder could conceal. */
+	/** Independent CGHV 1.4 bytes expose decoder errors that a shared encoder could conceal. */
 	struct FCGHReconstructionPeer
 	{
 		ISocketSubsystem* Subsystem = nullptr;
@@ -212,7 +212,7 @@ namespace
 						TArray<uint8> RequestPayload;
 						RequestPayload.SetNumUninitialized(static_cast<int32>(PayloadSize));
 						bReceivedRequest = Transfer(*Client, RequestPayload.GetData(), RequestPayload.Num(), false, Deadline)
-							&& RequestHeader[5] == 1 && RequestHeader[7] == 2 && RequestHeader[9] == 5;
+							&& RequestHeader[5] == 1 && RequestHeader[7] == 4 && RequestHeader[9] == 5;
 					}
 				}
 				if (bReceivedRequest)
@@ -222,12 +222,12 @@ namespace
 					{
 						FPlatformProcess::Sleep(0.005f);
 					}
-					// Independently encoded 1.2 complex result: 32-byte metadata then six real/imaginary pairs.
+					// Independently encoded 1.4 complex result: 32-byte metadata then six real/imaginary pairs.
 					TArray<uint8> Reply;
 					Reply.Init(0, 32 + 32 + 6 * 16);
 					Reply[0] = 'C'; Reply[1] = 'G'; Reply[2] = 'H'; Reply[3] = 'V';
 					Reply[5] = 1; // major 1
-					Reply[7] = 2; // minor 2
+					Reply[7] = 4; // minor 4
 					Reply[9] = 6; // ReconstructionResult
 					FMemory::Memcpy(Reply.GetData() + 16, RequestHeader + 16, 8);
 					Reply[31] = 32 + 6 * 16;
@@ -258,7 +258,7 @@ namespace
 					case 6: Reply.SetNum(72); break; // Truncated body, unchanged advertised length.
 					case 7: Reply[29] = 1; break; // Payload exceeds the requested output size.
 					case 8: Reply[48] = 0x7f; Reply[49] = 0xf0; break; // Infinite compute duration.
-					case 9: Reply[7] = 3; break; // Unsupported future protocol minor.
+					case 9: Reply[7] = 5; break; // Unsupported future protocol minor.
 					case 10: Reply[35] = 1; break; // A solver success is not reconstruction success.
 					case 11: Reply[9] = 2; break; // Solver Result instead of ReconstructionResult.
 					case 12: Reply[72] = 0x7f; Reply[73] = 0xf0; break; // Infinite imaginary component.
@@ -332,7 +332,7 @@ bool FCGHDockerReconstructionMalformedTest::RunTest(const FString& Parameters)
 		const uint64 Before = Scene.Observer->GetComplexFieldRevision();
 		TestTrue(TEXT("Actor queues a real reconstruction request"), Scene.Reconstructor->StartReconstruction());
 		if (!WaitForDockerReconstructor(*this, *Scene.Reconstructor)) return false;
-		TestTrue(TEXT("Peer receives a complete CGHV 1.2 reconstruction request"), Peer.Worker.Get());
+		TestTrue(TEXT("Peer receives a complete CGHV 1.4 reconstruction request"), Peer.Worker.Get());
 		if (ResponseCase == 0)
 		{
 			if (!TestTrue(TEXT("Fragmented complex response reaches Ready"), Scene.Reconstructor->JobState == ECGHReconstructionJobState::Ready))
@@ -381,7 +381,7 @@ bool FCGHDockerReconstructionValidationTest::RunTest(const FString& Parameters)
 		case 5: Input.Pattern.PhaseRad[0] = std::numeric_limits<double>::infinity(); break;
 		case 6: Input.Pattern.ResolutionX += 1; break;
 		case 7: Input.ObserverPlane.PositionSLMM.X = -1.0; break;
-		case 8: Input.Mode = ECGHReconstructionMode::Camera; break;
+		case 8: Input.Mode = static_cast<ECGHReconstructionMode>(255); break;
 		case 9: Input.PropagationConvention = static_cast<ECGHPropagationConvention>(127); break;
 		}
 		const auto Job = Backend->Submit(MoveTemp(Input));

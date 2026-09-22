@@ -10,6 +10,7 @@
 
 # Generated reconstruction field assets (raw exports and PNGs are covered by /Saved/)
 /Content/CGHSim/ObserverFields/Generated/
+/Content/CGHSim/CameraFields/Generated/
 
 # Generated files for source-based project plugins
 /Plugins/**/Binaries/

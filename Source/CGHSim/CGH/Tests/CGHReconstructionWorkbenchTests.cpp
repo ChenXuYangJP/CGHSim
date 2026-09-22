@@ -9,6 +9,7 @@
 #include "CGH/Actors/CGHSLMActor.h"
 #include "CGH/Actors/CGHTargetActor.h"
 #include "Engine/World.h"
+#include "Components/SceneComponent.h"
 #include "Misc/AutomationTest.h"
 #include "Tests/AutomationCommon.h"
 
@@ -154,6 +155,77 @@ bool FCGHReconstructionWorkbenchValidationTest::RunTest(const FString& Parameter
 	TestFalse(TEXT("Scaled source is rejected"), Scene.Workbench->CaptureReconstructionInput(Input, Error));
 	Scene.Light->SetActorScale3D(FVector::OneVector);
 	TestTrue(TEXT("Restoring required optical actors allows capture"), Scene.Workbench->CaptureReconstructionInput(Input, Error));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHReconstructionCameraSnapshotTest,
+	"CGH.Reconstruction.Workbench.CameraLensSamplingAndPose",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FCGHReconstructionCameraSnapshotTest::RunTest(const FString& Parameters)
+{
+	FCGHReconstructionWorkbenchFixture Scene;
+	FCGHReconstructionWorkbenchFixture OtherScene;
+	if (!Scene.Initialize(*this) || !OtherScene.Initialize(*this)) return false;
+	ACGHCameraActor* Camera = Scene.GetTestWorld()->SpawnActor<ACGHCameraActor>();
+	if (!TestNotNull(TEXT("Camera fixture exists"), Camera)) return false;
+	Scene.Workbench->Camera = Camera;
+	Scene.Workbench->ObserverPlane = nullptr;
+	Scene.SLM->SetActorLocationAndRotation(FVector(20.0, -10.0, 4.0), FRotator(13.0, 21.0, -9.0));
+	const FTransform SLMTransform = Scene.SLM->GetActorTransform();
+	Camera->SetActorLocationAndRotation(SLMTransform.TransformPositionNoScale(FVector(40.0, 0.1, -0.2)),
+		SLMTransform.GetRotation() * FRotator(0.0, 180.0, 17.0).Quaternion());
+	Camera->GetOpticalReference()->SetRelativeLocationAndRotation(FVector(0.3, 0.2, -0.1), FRotator(1.0, 2.0, 5.0));
+	Camera->Parameters.OutputResolutionX = 3;
+	Camera->Parameters.OutputResolutionY = 2;
+	Camera->Parameters.SensorWidthMm = 0.03;
+	Camera->Parameters.SensorHeightMm = 0.02;
+	Camera->Parameters.FocalLengthMm = 50.0;
+	Camera->Parameters.FocusDistanceMm = 400.0;
+	Camera->Parameters.FNumber = 8.0;
+	Camera->Parameters.PupilResolutionX = 4;
+	Camera->Parameters.PupilResolutionY = 6;
+	FCGHReconstructionInput Input;
+	FString Error;
+	TestTrue(TEXT("Camera capture requires no observer or targets"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	TestTrue(TEXT("Camera capture selects the requested mode"), Input.Mode == ECGHReconstructionMode::Camera);
+	TestTrue(TEXT("Metadata capture does not copy SLM samples"), Input.Pattern.PhaseRad.IsEmpty());
+	const FTransform Lens = Camera->GetOpticalTransform();
+	TestTrue(TEXT("Optical reference offset is expressed in SLM meters"), Input.Camera.OpticalPositionSLMM.Equals(
+		SLMTransform.InverseTransformPositionNoScale(Lens.GetLocation()) * 0.01, 1.0e-12));
+	TestTrue(TEXT("Full lens quaternion preserves roll"), Input.Camera.OpticalRotationSLM.Equals(
+		SLMTransform.GetRotation().Inverse() * Lens.GetRotation(), 1.0e-12));
+	TestTrue(TEXT("Forward axis agrees with the full lens rotation"), Input.Camera.ForwardDirectionSLM.Equals(Input.Camera.OpticalRotationSLM.GetAxisX(), 1.0e-12));
+	TestEqual(TEXT("Lens focal length uses meters"), Input.Camera.FocalLengthM, 0.05, 1.0e-15);
+	TestEqual(TEXT("Focus distance uses meters"), Input.Camera.FocusDistanceM, 0.4, 1.0e-15);
+	TestEqual(TEXT("Legacy sensor extent determines horizontal sampling"), Input.Camera.PixelPitchXM, 1.0e-5, 1.0e-15);
+	TestEqual(TEXT("Pupil quadrature resolution is exported"), Input.Camera.PupilResolutionY, 6);
+	Camera->Parameters.SensorSampling = ECGHCameraSensorSampling::PixelPitch;
+	Camera->Parameters.PixelPitchXUm = 7.0;
+	Camera->Parameters.PixelPitchYUm = 11.0;
+	TestTrue(TEXT("Pixel-pitch sampling captures immediately"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	TestEqual(TEXT("Pixel pitch is authoritative in pitch mode"), Input.Camera.PixelPitchYM, 11.0e-6, 1.0e-15);
+	TestEqual(TEXT("Effective width comes from pitch times sensor columns"), Input.Camera.SensorWidthM, 21.0e-6, 1.0e-15);
+	TestEqual(TEXT("Effective height comes from pitch times sensor rows"), Input.Camera.SensorHeightM, 22.0e-6, 1.0e-15);
+	ACGHTargetActor* UnusedTarget = Scene.GetTestWorld()->SpawnActor<ACGHTargetActor>();
+	Scene.Workbench->Targets = {UnusedTarget};
+	Scene.Workbench->UpdateSceneDescription();
+	const uint64 TargetRevision = UnusedTarget->TargetDescription.Revision;
+	UnusedTarget->Parameters.Amplitude += 1.0;
+	TestTrue(TEXT("Camera metadata capture ignores unused target work"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	TestEqual(TEXT("Capture does not rebuild target resources"), UnusedTarget->TargetDescription.Revision, TargetRevision);
+	Camera->SetActorScale3D(FVector(2.0, 1.0, 1.0));
+	TestFalse(TEXT("Camera actor world scale must remain unit"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	Camera->SetActorScale3D(FVector::OneVector);
+	Camera->GetOpticalReference()->SetRelativeScale3D(FVector(1.0, 2.0, 1.0));
+	TestFalse(TEXT("Camera optical reference world scale must remain unit"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	TestTrue(TEXT("Optical scale rejection is explained"), Error.Contains(TEXT("scale")));
+	Camera->GetOpticalReference()->SetRelativeScale3D(FVector::OneVector);
+	Scene.Workbench->Camera = OtherScene.GetTestWorld()->SpawnActor<ACGHCameraActor>();
+	TestFalse(TEXT("Cross-world camera references are rejected"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	Scene.Workbench->Camera = Camera;
+	TestTrue(TEXT("Restored camera metadata captures"), Scene.Workbench->CaptureReconstructionInput(Input, Error, ECGHReconstructionMode::Camera));
+	TestFalse(TEXT("Unknown reconstruction modes are still rejected"), Scene.Workbench->CaptureReconstructionInput(Input, Error, static_cast<ECGHReconstructionMode>(255)));
 	return true;
 }
 

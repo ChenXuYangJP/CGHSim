@@ -66,12 +66,10 @@ __host__ __device__ Position ObserverPosition(std::size_t index, const Grid& gri
             grid.z + ((z + grid.qw * tz) + (grid.qx * ty - grid.qy * tx))};
 }
 
-bool GatherSources(const wire::ReconstructionRequest& request, std::vector<IncidentSample>& sources,
+bool GatherSources(const wire::SLM& slm, const wire::Light& light, const wire::ObserverPlane& plane,
+                   const std::vector<double>& phases, std::vector<IncidentSample>& sources,
                    Grid& grid, std::string& error, const std::atomic<bool>& cancelled) {
-    if (!CheckCancelled(cancelled, error) || !wire::ValidateReconstructionRequest(request, error, &cancelled)) return false;
-    const auto& slm = request.slm;
-    const auto& light = request.light;
-    const auto& plane = request.observer;
+    if (!CheckCancelled(cancelled, error)) return false;
     if (!std::isfinite(slm.resolution_x * slm.pixel_pitch_x_m) ||
         !std::isfinite(slm.resolution_y * slm.pixel_pitch_y_m) ||
         !std::isfinite(plane.resolution_x * plane.pixel_pitch_x_m) ||
@@ -113,7 +111,7 @@ bool GatherSources(const wire::ReconstructionRequest& request, std::vector<Incid
             }
         }
     }
-    sources.resize(request.phase_radians.size());
+    sources.resize(phases.size());
     const double initial_phase = std::remainder(light.initial_phase_rad, wire::kTwoPi);
     for (std::size_t index = 0; index < sources.size(); ++index) {
         if ((index & 255) == 0 && !CheckCancelled(cancelled, error)) return false;
@@ -135,7 +133,7 @@ bool GatherSources(const wire::ReconstructionRequest& request, std::vector<Incid
         if (!std::isfinite(amplitude) || !std::isfinite(propagation))
             return wire::Fail(error, "Incident illumination exceeds the finite numerical range.");
         const double phase = initial_phase + std::remainder(propagation, wire::kTwoPi)
-                           + std::remainder(request.phase_radians[index], wire::kTwoPi);
+                           + std::remainder(phases[index], wire::kTwoPi);
         source.real = amplitude * std::cos(phase);
         source.imaginary = amplitude * std::sin(phase);
     }
@@ -295,22 +293,16 @@ std::string ExceptionMessage(const std::exception_ptr& exception) {
     catch (...) { return "Unknown host exception."; }
 }
 
-bool SolveInternal(const wire::ReconstructionRequest& request, wire::ReconstructionResult& result,
-                   std::string& error, const std::atomic<bool>& cancelled) {
-    const auto start = Clock::now();
-    std::vector<IncidentSample> sources;
-    Grid grid{};
-    if (!GatherSources(request, sources, grid, error, cancelled) || !CheckCancelled(cancelled, error)) return false;
+// Both optical stages use the same ordered FP64 kernel and disjoint output partitions.
+bool Propagate(const std::vector<IncidentSample>& sources, const Grid& grid,
+               std::vector<wire::ComplexSample>& samples, std::string& error,
+               const std::atomic<bool>& cancelled) {
+    if (!CheckCancelled(cancelled, error)) return false;
     int device_count = 0;
     if (!CheckCuda(cudaGetDeviceCount(&device_count), "device enumeration", error)) return false;
     if (device_count <= 0) return wire::Fail(error, "Reconstruction requires at least one visible CUDA device.");
-    wire::ReconstructionResult pending;
-    pending.status = wire::Status::ReconstructionSuccess;
-    pending.convention = request.convention;
-    pending.resolution_x = grid.width;
-    pending.resolution_y = grid.height;
     const std::size_t total_pixels = std::size_t(grid.width) * grid.height;
-    pending.samples.resize(total_pixels);
+    samples.resize(total_pixels);
     const auto worker_count = std::min(total_pixels, static_cast<std::size_t>(device_count));
     const auto pixels_per_device = total_pixels / worker_count;
     const auto remainder = total_pixels % worker_count;
@@ -330,7 +322,7 @@ bool SolveInternal(const wire::ReconstructionRequest& request, wire::Reconstruct
                 auto& outcome = outcomes[index];
                 try {
                     outcome.succeeded = SolveRange(ordinal, begin, end, sources, grid,
-                                                   pending.samples, cancellation, outcome.error);
+                                                   samples, cancellation, outcome.error);
                 } catch (...) { outcome.exception = std::current_exception(); }
                 if (!outcome.succeeded) {
                     int expected = -1;
@@ -358,8 +350,114 @@ bool SolveInternal(const wire::ReconstructionRequest& request, wire::Reconstruct
                 (outcome.exception ? ExceptionMessage(outcome.exception) : outcome.error);
         return false;
     }
+    return true;
+}
+
+bool SolveInternal(const wire::ReconstructionRequest& request, wire::ReconstructionResult& result,
+                   std::string& error, const std::atomic<bool>& cancelled) {
+    const auto start = Clock::now();
+    if (!wire::ValidateReconstructionRequest(request, error, &cancelled)) return false;
+    std::vector<IncidentSample> sources;
+    Grid grid{};
+    if (!GatherSources(request.slm, request.light, request.observer, request.phase_radians, sources, grid, error, cancelled)) return false;
+    wire::ReconstructionResult pending;
+    pending.convention = request.convention;
+    pending.resolution_x = grid.width;
+    pending.resolution_y = grid.height;
+    if (!Propagate(sources, grid, pending.samples, error, cancelled)) return false;
     pending.compute_seconds = std::chrono::duration<double>(Clock::now() - start).count();
     if (!wire::ValidateReconstructionResult(pending, error, &cancelled)) return false;
+    result = std::move(pending);
+    return true;
+}
+
+bool SolveCameraInternal(const wire::CameraReconstructionRequest& request, wire::CameraReconstructionResult& result,
+                         std::string& error, const std::atomic<bool>& cancelled) {
+    const auto start = Clock::now();
+    if (!wire::ValidateCameraReconstructionRequest(request, error, &cancelled)) return false;
+    const auto& camera = request.camera;
+    const double diameter = camera.focal_length_m / camera.f_number;
+    const double distance = camera.focal_length_m / (1.0 - camera.focal_length_m / camera.focus_distance_m);
+    const double pitch_x = diameter / camera.pupil_resolution_x;
+    const double pitch_y = diameter / camera.pupil_resolution_y;
+    const double area = pitch_x * pitch_y;
+    const double k = wire::kTwoPi / request.light.wavelength_m;
+    if (!std::isfinite(diameter) || diameter <= 0 || !std::isfinite(distance) || distance <= 0 ||
+        !std::isfinite(pitch_x) || pitch_x <= 0 || !std::isfinite(pitch_y) || pitch_y <= 0 ||
+        !std::isfinite(area) || area <= 0 ||
+        !std::isfinite(camera.output_resolution_x * camera.pixel_pitch_x_m) ||
+        !std::isfinite(camera.output_resolution_y * camera.pixel_pitch_y_m))
+        return wire::Fail(error, "Camera pupil, sensor extents and image distance must be finite and positive.");
+    const auto& q = camera.optical_rotation_slm;
+    // Camera optical +X points toward the scene, unlike the abstract +X second-stage propagation.
+    const Position forward{1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+        2.0 * (q.x * q.y + q.w * q.z), 2.0 * (q.x * q.z - q.w * q.y)};
+    for (std::size_t row : {std::size_t(0), std::size_t(request.slm.resolution_y - 1)}) {
+        for (std::size_t column : {std::size_t(0), std::size_t(request.slm.resolution_x - 1)}) {
+            const double y = (static_cast<double>(column) - (request.slm.resolution_x - 1) / 2.0) * request.slm.pixel_pitch_x_m;
+            const double z = ((request.slm.resolution_y - 1) / 2.0 - static_cast<double>(row)) * request.slm.pixel_pitch_y_m;
+            const auto& center = camera.optical_position_slm_m;
+            const double front = ((-center.x * forward.x) + ((y - center.y) * forward.y)) + ((z - center.z) * forward.z);
+            if (!std::isfinite(front) || front <= 0)
+                return wire::Fail(error, "Camera optical +X must face the SLM; every SLM pixel must lie in front of the lens.");
+        }
+    }
+    const double half_y = (camera.pupil_resolution_x - 1) / 2.0 * pitch_x;
+    const double half_z = (camera.pupil_resolution_y - 1) / 2.0 * pitch_y;
+    const double maximum_lens_phase = -0.5 * k * (half_y * (half_y / camera.focal_length_m) + half_z * (half_z / camera.focal_length_m));
+    if (!std::isfinite(maximum_lens_phase)) return wire::Fail(error, "Camera thin-lens phase exceeds the finite numerical range.");
+    wire::ObserverPlane pupil;
+    pupil.resolution_x = camera.pupil_resolution_x;
+    pupil.resolution_y = camera.pupil_resolution_y;
+    pupil.pixel_pitch_x_m = pitch_x;
+    pupil.pixel_pitch_y_m = pitch_y;
+    pupil.position_slm_m = camera.optical_position_slm_m;
+    pupil.rotation_slm = q;
+    std::vector<IncidentSample> sources;
+    Grid pupil_grid{};
+    if (!GatherSources(request.slm, request.light, pupil, request.phase_radians, sources, pupil_grid, error, cancelled)) return false;
+    const Grid sensor_grid{camera.output_resolution_x, camera.output_resolution_y,
+        camera.pixel_pitch_x_m, camera.pixel_pitch_y_m, k, area / wire::kTwoPi,
+        distance, 0, 0, 0, 0, 0, 1};
+    // Validate the second stage's corner distances before launching either stage.
+    for (std::size_t row : {std::size_t(0), std::size_t(sensor_grid.height - 1)}) {
+        for (std::size_t column : {std::size_t(0), std::size_t(sensor_grid.width - 1)}) {
+            const Position point = ObserverPosition(row * sensor_grid.width + column, sensor_grid);
+            for (double y : {-half_y, half_y}) for (double z : {-half_z, half_z}) {
+                const double r = Distance(point.x, point.y - y, point.z - z);
+                if (!std::isfinite(r) || !std::isfinite(k * r))
+                    return wire::Fail(error, "Camera pupil-to-sensor distance or phase exceeds the finite numerical range.");
+            }
+        }
+    }
+    std::vector<wire::ComplexSample> pupil_field;
+    if (!Propagate(sources, pupil_grid, pupil_field, error, cancelled)) return false;
+    // The first stage's workers are joined and streams drained before its sources are replaced.
+    sources.clear();
+    sources.reserve(pupil_field.size());
+    for (std::size_t index = 0; index < pupil_field.size(); ++index) {
+        if ((index & 255) == 0 && !CheckCancelled(cancelled, error)) return false;
+        const double y = (static_cast<double>(index % pupil.resolution_x) - (pupil.resolution_x - 1) / 2.0) * pitch_x;
+        const double z = ((pupil.resolution_y - 1) / 2.0 - static_cast<double>(index / pupil.resolution_x)) * pitch_y;
+        const double normalized_y = 2.0 * (y / diameter), normalized_z = 2.0 * (z / diameter);
+        if (normalized_y * normalized_y + normalized_z * normalized_z > 1.0) continue;
+        const double phase = -0.5 * k * (y * (y / camera.focal_length_m) + z * (z / camera.focal_length_m));
+        const double cosine = std::cos(phase), sine = std::sin(phase);
+        const auto& sample = pupil_field[index];
+        IncidentSample source{y, z, sample.real * cosine - sample.imaginary * sine,
+                                  sample.real * sine + sample.imaginary * cosine};
+        if (!std::isfinite(source.real) || !std::isfinite(source.imaginary))
+            return wire::Fail(error, "Camera lens-transmitted field exceeds the finite numerical range.");
+        sources.push_back(source);
+    }
+    std::vector<wire::ComplexSample>().swap(pupil_field);
+    wire::CameraReconstructionResult pending;
+    pending.convention = request.convention;
+    pending.resolution_x = sensor_grid.width;
+    pending.resolution_y = sensor_grid.height;
+    if (!Propagate(sources, sensor_grid, pending.samples, error, cancelled)) return false;
+    pending.compute_seconds = std::chrono::duration<double>(Clock::now() - start).count();
+    if (!wire::ValidateCameraReconstructionResult(pending, error, &cancelled)) return false;
     result = std::move(pending);
     return true;
 }
@@ -375,6 +473,19 @@ bool Solve(const wire::ReconstructionRequest& request, wire::ReconstructionResul
         return false;
     } catch (...) {
         error = "Reconstruction failed with an unknown host exception.";
+        return false;
+    }
+}
+bool Solve(const wire::CameraReconstructionRequest& request, wire::CameraReconstructionResult& result,
+           std::string& error, const std::atomic<bool>& cancelled) {
+    result = {};
+    error.clear();
+    try { return SolveCameraInternal(request, result, error, cancelled); }
+    catch (const std::exception& exception) {
+        error = std::string("Camera reconstruction host failure: ") + exception.what();
+        return false;
+    } catch (...) {
+        error = "Camera reconstruction failed with an unknown host exception.";
         return false;
     }
 }

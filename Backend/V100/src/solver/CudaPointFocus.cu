@@ -26,6 +26,7 @@ struct Emitter {
     double x, y, z;
     double amplitude, phase;
     double weighted_real = 0, weighted_imaginary = 0;
+    int amplitude_exponent = 0; // Inverse-r mode stores raw amplitude as mantissa/exponent.
 };
 struct Aperture {
     double half_y, half_z, k, minimum_incident, maximum_incident;
@@ -40,6 +41,18 @@ struct CompensatedSum {
     __host__ __device__ double Value() const { return sum + correction; }
 };
 struct PixelSums { CompensatedSum real, imaginary; };
+struct InverseRPixelSums {
+    CompensatedSum real, imaginary, weight;
+    int max_weight_exponent = 0;
+    __device__ void Rescale(double factor) {
+        real.sum *= factor;
+        real.correction *= factor;
+        imaginary.sum *= factor;
+        imaginary.correction *= factor;
+        weight.sum *= factor;
+        weight.correction *= factor;
+    }
+};
 struct Grid {
     std::uint32_t width, height;
     double pitch_x, pitch_y, k, initial_phase, direction_y, direction_z, zero_threshold;
@@ -171,6 +184,18 @@ bool GatherEmitters(const wire::Request& request, std::vector<Emitter>& emitters
     }
     if (!(maximum_amplitude > 0))
         return wire::Fail(error, "PointFocus requires at least one source point with positive amplitude.");
+    if (request.algorithm == wire::Algorithm::PointFocusInverseR) {
+        // Keep raw amplitude's exponent before any normalization. A tiny source
+        // close to a pixel can matter as much as a much brighter distant source.
+        for (auto& emitter : emitters) {
+            if (!CheckCancelled(cancelled, error)) return false;
+            emitter.amplitude = std::frexp(emitter.amplitude, &emitter.amplitude_exponent);
+            emitter.weighted_real = std::cos(emitter.phase);
+            emitter.weighted_imaginary = std::sin(emitter.phase);
+        }
+        zero_threshold = 0; // This mode derives the threshold separately at each pixel.
+        return true;
+    }
     CompensatedSum weight_sum;
     for (auto& emitter : emitters) {
         if (!CheckCancelled(cancelled, error)) return false;
@@ -193,6 +218,7 @@ struct DeviceResources {
     cudaStream_t stream = nullptr;
     Emitter* emitters = nullptr;
     PixelSums* sums = nullptr;
+    InverseRPixelSums* inverse_sums = nullptr;
     double* phases = nullptr;
     int* numerical_error = nullptr;
     bool Release(std::string* error = nullptr) {
@@ -208,6 +234,7 @@ struct DeviceResources {
         if (stream) release(cudaStreamSynchronize(stream), "stream cleanup");
         if (numerical_error) { release(cudaFree(numerical_error), "error-buffer free"); numerical_error = nullptr; }
         if (phases) { release(cudaFree(phases), "phase-buffer free"); phases = nullptr; }
+        if (inverse_sums) { release(cudaFree(inverse_sums), "inverse-distance sum-buffer free"); inverse_sums = nullptr; }
         if (sums) { release(cudaFree(sums), "sum-buffer free"); sums = nullptr; }
         if (emitters) { release(cudaFree(emitters), "emitter-buffer free"); emitters = nullptr; }
         if (stream) { release(cudaStreamDestroy(stream), "stream destroy"); stream = nullptr; }
@@ -260,6 +287,7 @@ __device__ void StorePhase(double phase, std::size_t index, double* phases, int*
     phases[index] = WrapToTwoPi(phase);
 }
 
+template <bool InverseR>
 __global__ void SingleEmitterKernel(const Emitter* emitters, Grid grid,
                                     std::size_t pixel_begin, std::size_t pixel_count,
                                     double* phases, int* error) {
@@ -270,6 +298,12 @@ __global__ void SingleEmitterKernel(const Emitter* emitters, Grid grid,
     const auto& emitter = emitters[0];
     const double incident = grid.initial_phase + grid.k * (grid.direction_y * yp + grid.direction_z * zp);
     const double r = Distance(emitter.x, emitter.y - yp, emitter.z - zp);
+    if constexpr (InverseR) {
+        if (!::isfinite(r) || r <= 0) {
+            atomicCAS(error, 0, 3);
+            return;
+        }
+    }
     // Preserve the reference's analytic branch when only one positive source remains.
     StorePhase((emitter.phase - grid.k * r) - incident, local, phases, error);
 }
@@ -308,17 +342,69 @@ __global__ void AccumulateKernel(const Emitter* emitters, std::size_t emitter_be
     StorePhase(phase, local, phases, error);
 }
 
+__global__ void AccumulateInverseRKernel(const Emitter* emitters, std::size_t emitter_begin,
+                                         std::size_t emitter_count, Grid grid,
+                                         std::size_t pixel_begin, std::size_t pixel_count,
+                                         InverseRPixelSums* states, bool final_batch,
+                                         double* phases, int* error) {
+    const std::size_t local = std::size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (local >= pixel_count) return;
+    double yp, zp;
+    PixelPosition(pixel_begin + local, grid, yp, zp);
+    InverseRPixelSums state = states[local];
+    for (std::size_t index = emitter_begin; index < emitter_begin + emitter_count; ++index) {
+        const auto& emitter = emitters[index];
+        const double r = Distance(emitter.x, emitter.y - yp, emitter.z - zp);
+        if (!::isfinite(r) || r <= 0) {
+            atomicCAS(error, 0, 3);
+            return;
+        }
+        int distance_exponent;
+        const double distance_mantissa = ::frexp(r, &distance_exponent);
+        const int exponent = emitter.amplitude_exponent - distance_exponent;
+        if (index == 0) state.max_weight_exponent = exponent;
+        else if (exponent > state.max_weight_exponent) {
+            state.Rescale(::ldexp(1.0, state.max_weight_exponent - exponent));
+            state.max_weight_exponent = exponent;
+        }
+        const double weight = ::ldexp(emitter.amplitude / distance_mantissa,
+                                      exponent - state.max_weight_exponent);
+        const double propagation = grid.k * r;
+        const double c = ::cos(propagation);
+        const double s = ::sin(propagation);
+        state.real.Add(weight * (emitter.weighted_real * c + emitter.weighted_imaginary * s));
+        state.imaginary.Add(weight * (emitter.weighted_imaginary * c - emitter.weighted_real * s));
+        state.weight.Add(weight);
+    }
+    states[local] = state;
+    if (!final_batch) return;
+    const double field_real = state.real.Value();
+    const double field_imaginary = state.imaginary.Value();
+    const double weight_sum = state.weight.Value();
+    if (!::isfinite(field_real) || !::isfinite(field_imaginary) || !::isfinite(weight_sum)) {
+        atomicCAS(error, 0, 1);
+        return;
+    }
+    const double incident = grid.initial_phase + grid.k * (grid.direction_y * yp + grid.direction_z * zp);
+    const double phase = ::hypot(field_real, field_imaginary) <= kCancellationTolerance * weight_sum
+        ? 0 : ::atan2(field_imaginary, field_real) - incident;
+    StorePhase(phase, local, phases, error);
+}
+
 // Every worker owns its CUDA context selection and resources. Pixel ranges are
 // disjoint, but kernel offsets always refer to the original full SLM grid.
 bool SolveRange(int ordinal, std::size_t pixel_begin, std::size_t pixel_end,
-                const std::vector<Emitter>& emitters, const Grid& grid,
+                const std::vector<Emitter>& emitters, const Grid& grid, bool inverse_r,
                 std::vector<double>& phases, const Cancellation& cancellation,
                 std::string& error) {
     if (!cancellation.Check(error) || !CheckCuda(cudaSetDevice(ordinal), "device selection", error)) return false;
     DeviceResources device;
+    void** sums_address = inverse_r ? reinterpret_cast<void**>(&device.inverse_sums)
+                                    : reinterpret_cast<void**>(&device.sums);
+    const auto sums_bytes = kPixelsPerTile * (inverse_r ? sizeof(InverseRPixelSums) : sizeof(PixelSums));
     if (!CheckCuda(cudaStreamCreateWithFlags(&device.stream, cudaStreamNonBlocking), "stream creation", error) ||
         !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.emitters), emitters.size() * sizeof(Emitter)), "emitter allocation", error) ||
-        !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.sums), kPixelsPerTile * sizeof(PixelSums)), "sum allocation", error) ||
+        !CheckCuda(cudaMalloc(sums_address, sums_bytes), "sum allocation", error) ||
         !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.phases), kPixelsPerTile * sizeof(double)), "phase allocation", error) ||
         !CheckCuda(cudaMalloc(reinterpret_cast<void**>(&device.numerical_error), sizeof(int)), "error allocation", error)) return false;
     if (!cancellation.Check(error)) return false;
@@ -335,18 +421,30 @@ bool SolveRange(int ordinal, std::size_t pixel_begin, std::size_t pixel_end,
         const auto blocks = static_cast<unsigned>((count + kThreadsPerBlock - 1) / kThreadsPerBlock);
         if (!CheckCuda(cudaMemsetAsync(device.numerical_error, 0, sizeof(int), device.stream), "clear numerical error", error)) return false;
         if (emitters.size() == 1) {
-            SingleEmitterKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, grid, begin, count,
-                                                                              device.phases, device.numerical_error);
+            if (inverse_r) {
+                SingleEmitterKernel<true><<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, grid, begin, count,
+                                                                                       device.phases, device.numerical_error);
+            } else {
+                SingleEmitterKernel<false><<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, grid, begin, count,
+                                                                                        device.phases, device.numerical_error);
+            }
             if (!CheckCuda(cudaGetLastError(), "single-emitter kernel launch", error) ||
                 !WaitForStream(device.stream, cancellation, error)) return false;
         } else {
-            if (!CheckCuda(cudaMemsetAsync(device.sums, 0, count * sizeof(PixelSums), device.stream), "clear compensated sums", error)) return false;
+            void* sums = inverse_r ? static_cast<void*>(device.inverse_sums) : static_cast<void*>(device.sums);
+            const auto state_size = inverse_r ? sizeof(InverseRPixelSums) : sizeof(PixelSums);
+            if (!CheckCuda(cudaMemsetAsync(sums, 0, count * state_size, device.stream), "clear compensated sums", error)) return false;
             for (std::size_t first = 0; first < emitters.size(); first += kEmittersPerBatch) {
                 if (!cancellation.Check(error)) return false;
                 const auto emitter_count = std::min(kEmittersPerBatch, emitters.size() - first);
                 const bool final = first + emitter_count == emitters.size();
-                AccumulateKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, first, emitter_count,
-                    grid, begin, count, device.sums, final, device.phases, device.numerical_error);
+                if (inverse_r) {
+                    AccumulateInverseRKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, first, emitter_count,
+                        grid, begin, count, device.inverse_sums, final, device.phases, device.numerical_error);
+                } else {
+                    AccumulateKernel<<<blocks, kThreadsPerBlock, 0, device.stream>>>(device.emitters, first, emitter_count,
+                        grid, begin, count, device.sums, final, device.phases, device.numerical_error);
+                }
                 if (!CheckCuda(cudaGetLastError(), "coherent-sum kernel launch", error) ||
                     !WaitForStream(device.stream, cancellation, error)) return false;
             }
@@ -357,6 +455,7 @@ bool SolveRange(int ordinal, std::size_t pixel_begin, std::size_t pixel_end,
             !CheckCuda(cudaMemcpyAsync(phases.data() + begin, device.phases, count * sizeof(double),
                                       cudaMemcpyDeviceToHost, device.stream), "phase download", error) ||
             !WaitForStream(device.stream, cancellation, error)) return false;
+        if (numerical_error == 3) return wire::Fail(error, "Inverse-distance PointFocus requires finite nonzero source distances.");
         if (numerical_error == 1) return wire::Fail(error, "PointFocus encountered a nonfinite complex field.");
         if (numerical_error != 0) return wire::Fail(error, "PointFocus encountered a nonfinite propagation phase.");
     }
@@ -405,8 +504,9 @@ bool SolveInternal(const wire::Request& request, wire::Result& result,
     if (!CheckCuda(cudaGetDeviceCount(&device_count), "device enumeration", error)) return false;
     if (device_count <= 0) return wire::Fail(error, "PointFocus requires at least one visible CUDA device.");
 
+    const bool inverse_r = request.algorithm == wire::Algorithm::PointFocusInverseR;
     wire::Result pending;
-    pending.status = wire::Status::PointFocusSuccess;
+    pending.status = inverse_r ? wire::Status::PointFocusInverseRSuccess : wire::Status::PointFocusSuccess;
     pending.convention = request.convention;
     pending.resolution_x = request.slm.resolution_x;
     pending.resolution_y = request.slm.resolution_y;
@@ -438,7 +538,7 @@ bool SolveInternal(const wire::Request& request, wire::Result& result,
             workers.threads.emplace_back([&, index, ordinal, pixel_begin, pixel_end] {
                 auto& outcome = outcomes[index];
                 try {
-                    outcome.succeeded = SolveRange(ordinal, pixel_begin, pixel_end, emitters, grid,
+                    outcome.succeeded = SolveRange(ordinal, pixel_begin, pixel_end, emitters, grid, inverse_r,
                                                    pending.phase_radians, cancellation, outcome.error);
                 } catch (...) {
                     // Do not let an exception escape a worker, even when host

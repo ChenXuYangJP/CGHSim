@@ -167,7 +167,7 @@ namespace
 		}
 		Test.AddInfo(FString::Printf(TEXT("%s: maximum wrapped CUDA/reference error %.17g rad (tolerance %.1g)."),
 			Label, MaximumError, CudaParityTolerance));
-		return Test.TestTrue(FString::Printf(TEXT("%s matches the unchanged CGHPointFocus reference"), Label),
+		return Test.TestTrue(FString::Printf(TEXT("%s matches the selected CGHPointFocus reference"), Label),
 			MaximumError <= CudaParityTolerance);
 	}
 
@@ -187,7 +187,7 @@ namespace
 			return false;
 		}
 		if (!Test.TestTrue(FString::Printf(TEXT("%s CUDA succeeds: %s"), Label, *Job->Result.Error), Job->Result.bSucceeded)
-			|| !Test.TestFalse(TEXT("Numerical parity must come from PointFocusSuccess, never DummySuccess"), Job->Result.bIsDummy))
+			|| !Test.TestFalse(TEXT("Numerical parity must come from the selected solver success status, never DummySuccess"), Job->Result.bIsDummy))
 		{
 			return false;
 		}
@@ -260,6 +260,61 @@ bool FCGHCudaReferenceParityTest::RunTest(const FString& Parameters)
 	Opposite.PhaseRad = UE_DOUBLE_PI;
 	Destructive.Scene.Targets.Add(Opposite);
 	bPassed &= CudaCompareCase(*this, *Backend, TEXT("Destructive interference follows the deterministic zero rule"), MoveTemp(Destructive));
+	return bPassed;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHCudaInverseDistanceParityTest,
+	"CGH.CudaBackend.InverseDistanceReferenceParity", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHCudaInverseDistanceParityTest::RunTest(const FString& Parameters)
+{
+	const int32 Port = CudaTestPort(*this);
+	if (Port <= 0) return Port == 0;
+	UCGHDockerSolverBackend* Backend = CudaBackend(Port);
+	const std::atomic<bool> NotCancelled{false};
+	FCGHSolverInput Single = CudaReferenceInput();
+	FCGHSolverInput LegacySingle = Single;
+	const auto LegacyJob = Backend->Submit(MoveTemp(LegacySingle));
+	Single.Algorithm = ECGHSolverAlgorithm::PointFocusInverseR;
+	const FCGHSolverResult SingleReference = CGHPointFocus::Solve(Single, NotCancelled);
+	const auto InverseJob = Backend->Submit(MoveTemp(Single));
+	if (!CudaWaitJob(*this, LegacyJob) || !CudaWaitJob(*this, InverseJob)) return false;
+	if (!TestTrue(TEXT("Both single-point CUDA modes succeed"), LegacyJob->Result.bSucceeded && InverseJob->Result.bSucceeded)
+		|| !TestTrue(TEXT("Single-point inverse reference succeeds"), SingleReference.bSucceeded)) return false;
+	TestFalse(TEXT("Legacy single-point computation is not a dummy"), LegacyJob->Result.bIsDummy);
+	TestFalse(TEXT("Inverse-distance single-point computation is not a dummy"), InverseJob->Result.bIsDummy);
+	bool bPassed = TestTrue(TEXT("Positive 1/r scaling leaves the single-point CUDA phase bit-identical"),
+		LegacyJob->Result.Pattern.PhaseRad == InverseJob->Result.Pattern.PhaseRad);
+	bPassed &= CudaComparePattern(*this, TEXT("Single inverse-distance point"), InverseJob->Result.Pattern, SingleReference.Pattern);
+
+	FCGHSolverInput Multiple = CudaMultipleInput();
+	const FCGHSolverResult LegacyReference = CGHPointFocus::Solve(Multiple, NotCancelled);
+	Multiple.Algorithm = ECGHSolverAlgorithm::PointFocusInverseR;
+	const FCGHSolverResult InverseReference = CGHPointFocus::Solve(Multiple, NotCancelled);
+	if (!TestTrue(TEXT("Both unequal-distance reference modes succeed"), LegacyReference.bSucceeded && InverseReference.bSucceeded)) return false;
+	double ModeDifference = 0.0;
+	for (int32 Index = 0; Index < LegacyReference.Pattern.PhaseRad.Num(); ++Index)
+	{
+		ModeDifference = FMath::Max(ModeDifference, std::abs(std::remainder(
+			LegacyReference.Pattern.PhaseRad[Index] - InverseReference.Pattern.PhaseRad[Index], 2.0 * UE_DOUBLE_PI)));
+	}
+	bPassed &= TestTrue(TEXT("Unequal amplitudes and distances distinguish the two physical modes"), ModeDifference > 1.0e-4);
+	bPassed &= CudaCompareCase(*this, *Backend, TEXT("Inverse-distance unequal-amplitude three-point field"), MoveTemp(Multiple));
+	FCGHSolverInput Mesh = CudaMeshInput();
+	Mesh.Algorithm = ECGHSolverAlgorithm::PointFocusInverseR;
+	bPassed &= CudaCompareCase(*this, *Backend, TEXT("Inverse-distance rigid mesh with baked sample fields"), Mesh);
+	CudaSetGrid(Mesh, 33, 17);
+	FCGHPointCloudResource& Cloud = Mesh.PointClouds[0];
+	Cloud.Points.Reset();
+	for (int32 Index = 0; Index < 513; ++Index)
+	{
+		FCGHObjectPoint Point;
+		Point.PositionLocalM = FVector(0.00013 * Index, 0.00002 * (Index % 17), -0.00001 * (Index % 11));
+		Point.Amplitude = 0.07 + 0.11 * (Index % 7);
+		Point.Phase = -0.19 + 0.27 * (Index % 23);
+		Cloud.Points.Add(Point);
+	}
+	bPassed &= CudaCompareCase(*this, *Backend, TEXT("Inverse-distance ordered mesh spans three CUDA source batches"), MoveTemp(Mesh));
 	return bPassed;
 }
 
@@ -419,7 +474,39 @@ bool FCGHCudaActorPublicationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("The actor identifies the actual CUDA result"), Solver->StatusMessage.Contains(TEXT("CUDA PointFocus")));
 	TestFalse(TEXT("A CUDA result is not labelled as a dummy"), Solver->StatusMessage.Contains(TEXT("dummy")));
 	TestEqual(TEXT("PollSolver publishes the received phase exactly once"), SLM->GetPhasePatternRevision(), Revision + 1);
-	return CudaComparePattern(*this, TEXT("Actor -> Docker backend -> CUDA server -> job -> PollSolver -> SLM"), SLM->GetPhasePattern(), Reference.Pattern);
+	if (!CudaComparePattern(*this, TEXT("Actor -> Docker backend -> CUDA server -> job -> PollSolver -> SLM"), SLM->GetPhasePattern(), Reference.Pattern)) return false;
+	for (const ECGHSolverAlgorithm Algorithm : {ECGHSolverAlgorithm::PointFocusInverseR, ECGHSolverAlgorithm::PointFocus})
+	{
+		const uint64 BeforeSwitch = SLM->GetPhasePatternRevision();
+		Solver->Parameters.Algorithm = Algorithm;
+		if (!TestTrue(TEXT("Actor accepts a different solver algorithm"), Solver->StartSolve())) return false;
+		// Replace an already-launched mode twice before polling. Only the final mode may publish.
+		Solver->Parameters.Algorithm = Algorithm == ECGHSolverAlgorithm::PointFocus
+			? ECGHSolverAlgorithm::PointFocusInverseR : ECGHSolverAlgorithm::PointFocus;
+		if (!TestTrue(TEXT("An opposite algorithm supersedes in-flight work"), Solver->StartSolve())) return false;
+		Solver->Parameters.Algorithm = Algorithm;
+		if (!TestTrue(TEXT("The final requested algorithm replaces pending work"), Solver->StartSolve())) return false;
+		TestEqual(TEXT("Mode switches cannot publish before polling"), SLM->GetPhasePatternRevision(), BeforeSwitch);
+		const double SwitchDeadline = FPlatformTime::Seconds() + 35.0;
+		while (Solver->JobState == ECGHSolverJobState::Queued || Solver->JobState == ECGHSolverJobState::Running)
+		{
+			Solver->PollSolver();
+			if (FPlatformTime::Seconds() >= SwitchDeadline)
+			{
+				Solver->CancelSolve();
+				AddError(TEXT("CUDA actor algorithm switch exceeded its deadline."));
+				return false;
+			}
+			FPlatformProcess::Sleep(0.001f);
+		}
+		if (!TestTrue(FString::Printf(TEXT("Final algorithm reaches Ready: %s"), *Solver->StatusMessage), Solver->JobState == ECGHSolverJobState::Ready)) return false;
+		Snapshot.Algorithm = Algorithm;
+		const FCGHSolverResult SwitchedReference = CGHPointFocus::Solve(Snapshot, NotCancelled);
+		if (!TestTrue(TEXT("Selected algorithm has a valid CPU reference"), SwitchedReference.bSucceeded)) return false;
+		TestEqual(TEXT("Only the final requested algorithm advances publication"), SLM->GetPhasePatternRevision(), BeforeSwitch + 1);
+		if (!CudaComparePattern(*this, TEXT("Actor algorithm switching preserves selected CPU/CUDA parity"), SLM->GetPhasePattern(), SwitchedReference.Pattern)) return false;
+	}
+	return true;
 }
 
 #endif // WITH_DEV_AUTOMATION_TESTS

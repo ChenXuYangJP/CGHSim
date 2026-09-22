@@ -18,6 +18,7 @@ struct CGHSIM_API FCGHComplexFieldSaveResult
 
 namespace CGHComplexFieldIO
 {
+	enum class ECoordinateFrame : uint8 { ObserverPlane, CameraSensor };
 	/**
 	 * Editor/game-thread save of an independent asset plus headerless little-endian complex128:
 	 * row-major float64 pairs [real, imaginary], a UTF-8 JSON sidecar, and three pixel-for-pixel G8 PNGs.
@@ -30,5 +31,5 @@ namespace CGHComplexFieldIO
 	 */
 	CGHSIM_API bool Save(const FCGHComplexField& Field, double PixelPitchXM, double PixelPitchYM,
 		const FString& AssetFolder, const FString& RawDirectory, const FText& Label,
-		FCGHComplexFieldSaveResult& Out);
+		FCGHComplexFieldSaveResult& Out, ECoordinateFrame CoordinateFrame = ECoordinateFrame::ObserverPlane);
 }

@@ -10,6 +10,7 @@ or Docker --gpus. Missing CUDA never becomes a skipped/passing numerical test.
 import argparse
 import copy
 from dataclasses import dataclass, field
+from decimal import Decimal, localcontext
 import itertools
 import math
 import socket
@@ -54,12 +55,13 @@ class Scene:
     incident_phase: float = 0.2
     light_source: int = 1
     modulation: int = 1
+    algorithm: int = 1
     targets: list = field(default_factory=lambda: [Target(1, (0.5, 0.015, -0.024), 2.2, 0.73)])
 
 
 def encode(scene):
-    """Encode the published CGHV 1.2 layout without using the C++ codec."""
-    payload = struct.pack("!IIIII4dI", 2, 1, 1, scene.width, scene.height,
+    """Encode the published CGHV 1.4 layout without using the C++ codec."""
+    payload = struct.pack("!IIIII4dI", 2, scene.algorithm, 1, scene.width, scene.height,
                           scene.pitch_x, scene.pitch_y, scene.width * scene.pitch_x,
                           scene.height * scene.pitch_y, scene.modulation)
     payload += struct.pack("!6dI4d", scene.wavelength, 0.65, scene.incident_phase,
@@ -105,6 +107,8 @@ def oracle(scene):
     Source phasors are formed before propagation to retain opposing pi phases.
     math.fsum is an independent accurate sum, not a copy of CUDA accumulation.
     """
+    if scene.algorithm == 3:
+        return inverse_r_oracle(scene)
     emitters = []
     for target in scene.targets:
         if target.samples is None:
@@ -146,6 +150,53 @@ def oracle(scene):
     return phases
 
 
+
+def inverse_r_oracle(scene):
+    """Independent two-pass inverse-distance oracle with Decimal weight ratios.
+
+    Decimal avoids A/r overflow and underflow without copying the device's frexp
+    normalization or exponent-changing state. fsum supplies independent sums.
+    """
+    emitters = []
+    for target in scene.targets:
+        if target.samples is None:
+            if target.amplitude > 0:
+                emitters.append((target.position, target.amplitude, target.phase))
+        else:
+            for sample in target.samples:
+                if sample.amplitude > 0:
+                    local = rotate(target.rotation, sample.position)
+                    emitters.append((tuple(a+b for a, b in zip(target.position, local)), sample.amplitude, sample.phase))
+    k = TAU / scene.wavelength
+    phases = []
+    with localcontext() as context:
+        context.prec = 80
+        for row in range(scene.height):
+            z = ((scene.height - 1) / 2 - row) * scene.pitch_y
+            for column in range(scene.width):
+                y = (column - (scene.width - 1) / 2) * scene.pitch_x
+                incident = scene.incident_phase + k * (scene.direction[1] * y + scene.direction[2] * z)
+                distances = [math.hypot(p[0], p[1]-y, p[2]-z) for p, _, _ in emitters]
+                if len(emitters) == 1:
+                    phases.append(wrap(emitters[0][2] - k * distances[0] - incident))
+                    continue
+                ratios = [Decimal.from_float(amplitude) / Decimal.from_float(distance)
+                          for (_, amplitude, _), distance in zip(emitters, distances)]
+                maximum = max(ratios)
+                weights = [float(ratio / maximum) for ratio in ratios]
+                contributions = []
+                for (_, _, phase), distance, weight in zip(emitters, distances, weights):
+                    source = complex(math.cos(phase), math.sin(phase))
+                    propagator = complex(math.cos(k * distance), -math.sin(k * distance))
+                    contributions.append(weight * source * propagator)
+                real = math.fsum(value.real for value in contributions)
+                imaginary = math.fsum(value.imag for value in contributions)
+                threshold = 32.0 * sys.float_info.epsilon * math.fsum(weights)
+                phase = 0.0 if math.hypot(real, imaginary) <= threshold else math.atan2(imaginary, real) - incident
+                phases.append(wrap(phase))
+    return phases
+
+
 def receive_result(sock, identity, scene, label):
     """Validate one computed result and connection closure, without an oracle."""
     kind, reply_identity, payload = receive(sock)
@@ -153,8 +204,9 @@ def receive_result(sock, identity, scene, label):
     assert reply_identity == identity, f"{label}: wrong request identity"
     assert len(payload) >= 32, f"{label}: truncated result metadata"
     status, convention, width, height, seconds, count = struct.unpack("!IIIIdQ", payload[:32])
-    assert (status, convention, width, height, count) == (2, 1, scene.width, scene.height, scene.width * scene.height), (
-        f"{label}: CUDA PointFocusSuccess metadata expected, got {status, convention, width, height, count}")
+    expected_status = 4 if scene.algorithm == 3 else 2
+    assert (status, convention, width, height, count) == (expected_status, 1, scene.width, scene.height, scene.width * scene.height), (
+        f"{label}: CUDA solver status {expected_status} expected, got {status, convention, width, height, count}")
     assert math.isfinite(seconds) and seconds >= 0.0
     assert len(payload) == 32 + 8 * count
     phases = struct.unpack(f"!{count}d", payload[32:])
@@ -264,12 +316,87 @@ def numerical_and_validation(server):
     solve(server, base, "valid CUDA request recovers after rejected inputs")
 
 
-def cancellation(executable):
+
+def inverse_r_numerical_and_validation(server):
+    single = Scene(algorithm=3)
+    legacy_single = copy.deepcopy(single); legacy_single.algorithm = 1
+    assert solve(server, single, "inverse-r single point") == solve(server, legacy_single, "unchanged single-point baseline")
+
+    mixed = mixed_scene(); mixed.algorithm = 3
+    weighted = solve(server, mixed, "inverse-r mixed points and rotated mesh")
+    legacy = copy.deepcopy(mixed); legacy.algorithm = 1
+    unweighted = solve(server, legacy, "unchanged mixed-target baseline")
+    assert max(abs(math.remainder(a-b, TAU)) for a, b in zip(weighted, unweighted)) > 1.0e-5, (
+        "Unequal source distances must alter the multi-emitter hologram")
+    metadata = copy.deepcopy(mixed)
+    metadata.targets[-1].amplitude, metadata.targets[-1].phase = 99.0, -32.0
+    assert solve(server, metadata, "inverse-r mesh amplitude and phase already baked") == weighted
+
+    equal = Scene(width=1, height=1, algorithm=3, targets=[
+        Target(1, (0.3, 0.4, 0.0), 0.7, 0.2), Target(2, (-0.3, 0.0, 0.4), 1.3, -0.6)])
+    weighted_equal = solve(server, equal, "inverse-r equal-distance emitters")
+    equal.algorithm = 1
+    legacy_equal = solve(server, equal, "legacy equal-distance emitters")
+    assert max(abs(math.remainder(a-b, TAU)) for a, b in zip(weighted_equal, legacy_equal)) < PHASE_TOLERANCE
+
+    cancelling = Scene(algorithm=3, direction=(0.8, 0.36, -0.48), incident_phase=0.37, targets=[
+        Target(1, (0.2, 0.005, -0.004), 1.0e308, 0.0),
+        Target(2, (0.2, 0.005, -0.004), 1.0e308, math.pi)])
+    assert all(value == 0 for value in solve(server, cancelling, "inverse-r destructive cancellation threshold"))
+
+    extremes = [
+        ("raw amplitude exponent retained before inverse-distance weighting", Scene(width=1, height=1, wavelength=1.0e300,
+            algorithm=3, targets=[Target(1, (1.0e-300, 0.0, 0.0), 1.0e-300, 0.0),
+                                  Target(2, (1.0e300, 0.0, 0.0), 1.0e300, math.pi / 2)])),
+        ("inverse-distance weights beyond float64 maximum", Scene(width=1, height=1, algorithm=3,
+            targets=[Target(1, (1.0e-300, 0.0, 0.0), 1.0e308, 0.0),
+                     Target(2, (2.0e-300, 0.0, 0.0), 1.0e308, math.pi / 2)])),
+        ("inverse-distance weights below float64 minimum", Scene(width=1, height=1, wavelength=1.0e300, algorithm=3,
+            targets=[Target(1, (1.0e300, 0.0, 0.0), 1.0e-300, 0.0),
+                     Target(2, (2.0e300, 0.0, 0.0), 1.0e-300, math.pi / 2)])),
+    ]
+    for label, scene in extremes:
+        solve(server, scene, label)
+        scene.targets.reverse()
+        solve(server, scene, label + " reversed source order")
+
+    near_subnormal = Scene(width=1, height=1, algorithm=3, targets=[
+        Target(1, (1.0e-310, 0.0, 0.0), 1.0e-310, 0.73)])
+    solve(server, near_subnormal, "inverse-r supported positive subnormal single-source distance")
+    near_subnormal.targets.append(Target(2, (2.0e-310, 0.0, 0.0), 1.0e-310, -0.47))
+    solve(server, near_subnormal, "inverse-r supported positive subnormal multiple-source distances")
+    collapsed = Scene(width=1, height=1, algorithm=3, targets=[
+        Target(1, (float.fromhex("0x0.0000000000001p-1022"), 0.0, 0.0), 1.0, 0.73)])
+    reject(server, collapsed, "inverse-r single-source numerical distance collapsed to zero")
+    collapsed.algorithm = 1
+    solve(server, collapsed, "legacy single-source distance handling remains unchanged")
+
+    batched = Scene(width=7, height=5, algorithm=3, targets=[Target(1, (0.5, -0.002, 0.003), samples=[
+        Sample((0.001 + index * 1.0e-5, (index % 17) * 1.0e-6, (index % 23) * 1.0e-6),
+               math.ldexp(0.1 + (index % 11) / 10.0, (index // 256) * 3), 0.13 + (index % 7) / 10.0)
+        for index in range(513)])])
+    solve(server, batched, "inverse-r weights and corrected sums across two emitter batches")
+    scaled = copy.deepcopy(mixed)
+    for target in scaled.targets:
+        if target.samples is None:
+            target.amplitude *= 1.0e307
+        else:
+            for sample in target.samples:
+                sample.amplitude *= 1.0e307
+    scaled_phase = solve(server, scaled, "inverse-r common extreme amplitude scaling")
+    assert max(abs(math.remainder(a-b, TAU)) for a, b in zip(weighted, scaled_phase)) < PHASE_TOLERANCE
+    invalid = copy.deepcopy(mixed); invalid.light_source = 2
+    reject(server, invalid, "inverse-r PointSource illumination still unsupported")
+    invalid = copy.deepcopy(mixed); invalid.targets[0].position = (0.0, 0.0, 0.0)
+    reject(server, invalid, "inverse-r contributing coplanar point")
+
+
+def cancellation(executable, algorithm=1):
     # Only this test-owned process gets a heavy job; external services receive small checks.
     server = Server(executable, "--max-clients", "1")
     try:
         solve(server, Scene(), "CUDA cancellation fixture warmup")
-        heavy = Scene(width=1024, height=512, targets=[Target(1, (0.5, 0.0, 0.0), samples=[
+        heavy = Scene(width=1024, height=512, algorithm=algorithm, targets=[Target(1, (0.5, 0.0, 0.0), samples=[
             Sample((0.001 + index * 1.0e-8, (index % 17) * 1.0e-6, (index % 23) * 1.0e-6), 1.0, 0.13)
             for index in range(8192)
         ])])
@@ -312,13 +439,16 @@ def main():
         parser.error("provide exactly one executable path or --port 1..65535")
     if args.port:
         numerical_and_validation(ExternalServer(args.port))
+        inverse_r_numerical_and_validation(ExternalServer(args.port))
     else:
         server = Server(args.executable)
         try:
             numerical_and_validation(server)
+            inverse_r_numerical_and_validation(server)
         finally:
             server.close()
         cancellation(args.executable)
+        cancellation(args.executable, algorithm=3)
     print("CUDA PointFocus numerical, validation and requested lifecycle checks passed", flush=True)
 
 

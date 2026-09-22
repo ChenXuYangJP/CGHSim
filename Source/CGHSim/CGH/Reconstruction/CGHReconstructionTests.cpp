@@ -270,7 +270,7 @@ bool FCGHReconstructionValidationTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("Failure exposes no partial samples"), Result.Field.Samples.IsEmpty());
 		TestEqual(TEXT("Failure clears output dimensions"), Result.Field.ResolutionX, 0);
 	};
-	Reject(TEXT("Camera is unsupported"), [](FCGHReconstructionInput& I) { I.Mode = ECGHReconstructionMode::Camera; });
+	Reject(TEXT("Unknown reconstruction mode is rejected"), [](FCGHReconstructionInput& I) { I.Mode = static_cast<ECGHReconstructionMode>(255); });
 	Reject(TEXT("Unknown convention is rejected"), [](FCGHReconstructionInput& I) { I.PropagationConvention = static_cast<ECGHPropagationConvention>(255); });
 	Reject(TEXT("Complex modulation is rejected"), [](FCGHReconstructionInput& I) { I.SLM.ModulationType = ECGHSLMModulationType::Complex; });
 	Reject(TEXT("Missing phase is rejected"), [](FCGHReconstructionInput& I) { I.Pattern.PhaseRad.Reset(); });

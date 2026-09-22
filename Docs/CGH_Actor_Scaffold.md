@@ -8,7 +8,7 @@ This implements the editable scene structure from the [shared design](https://ch
 | --- | --- | --- |
 | `ACGHTargetActor` | `BP_CGHTargetPoint` | Point or static-mesh target, versioned geometry/point cloud, and debug preview |
 | `ACGHSLMActor` | `BP_CGHSLM` | Pixel resolution/pitch, derived active area, versioned phase storage, selected-actor phase preview, and explicit asset/raw-file saving |
-| `ACGHCameraActor` | `BP_CGHCamera` | Double-precision optical parameters driving a Cine Camera geometry preview |
+| `ACGHCameraActor` | `BP_CGHCamera` | Thin-lens sensor reconstruction, sensor resolution/pitch, complex field preview/save/load, and selectable Cine Camera geometry preview |
 | `ACGHReconstructionLightActor` | `BP_CGHReconstructionLight` | Wavelength, amplitude, phase, polarization and propagation direction |
 | `ACGHWorkbenchActor` | `BP_CGHWorkbench` | Explicit actor references, automatic SI snapshots, validation, refresh, and optional solver buttons/status |
 | `ACGHSolverActor` | Optional generated `BP_CGHSolver` | Asynchronous CPU PointFocus jobs for Point/Mesh target lists, input/output buffers, cancellation, opt-in auto updates, and validated SLM publication |
@@ -36,7 +36,7 @@ The starter map places the SLM at `(0,0,0)` cm, the target at `(50,0,0)` cm, the
 - `GetOpticalPositionMeters(SLM)` subtracts the SLM origin, applies its inverse rotation and converts cm to m. It intentionally ignores reference scale. Passing null returns world position in meters; the workbench requires an assigned SLM.
 - Target `MarkerRadiusCm` affects only the visual sphere, never the mathematical point. Point targets ignore mesh and sampling settings and keep both geometry resources empty.
 - Light +X is its propagation direction. The reconstruction-light actor contains no UE illumination component.
-- Camera optical parameters flow one way into `PreviewCamera`. `OpticalReference` supplies the exported optical position and forward direction, including component offsets. Output resolution is independent of both filmback aspect and SLM resolution, and is currently stored only.
+- Camera `Parameters` drive `PreviewCamera`; on placed actors, editing the component’s Current Focal Length, Current Aperture, or Manual Focus Distance also updates the matching optical parameter. Component manual focus uses centimeters; the optical focus parameter uses millimeters. `OpticalReference` supplies the exported optical position and forward direction, including component offsets. Output resolution and effective sensor pitch define the reconstructed sensor. **Sensor Size** retains legacy width/height behavior; **Pixel Pitch** derives physical extent from resolution and pitch. The full optical quaternion also preserves sensor roll. Use **Camera (Thin Lens)** on the existing reconstructor; see [camera reconstruction](CGH_Camera_Reconstruction.md).
 - An SLM starts with `GenerationState = NotImplemented` and `HasPhaseData = false`. Publishing valid phase data changes the state to `Ready`; this indicates stored data. The legacy empty-state enum name does not describe whether a solver implementation exists; solver job state is separate. Clearing the data restores the initial state.
 
 ## Scene description and updates

@@ -12,12 +12,12 @@ import time
 HEADER = struct.Struct("!4sHHHHIQQ")
 
 
-def frame(kind, request_id, payload=b"", major=1, minor=2, flags=0, reserved=0):
+def frame(kind, request_id, payload=b"", major=1, minor=4, flags=0, reserved=0):
     return HEADER.pack(b"CGHV", major, minor, kind, flags, reserved, request_id, len(payload)) + payload
 
 
-def request(width=7, height=5, mesh=True):
-    data = struct.pack("!IIIII4dI", 2, 1, 1, width, height, 8e-6, 9e-6, width * 8e-6, height * 9e-6, 1)
+def request(width=7, height=5, mesh=True, algorithm=1):
+    data = struct.pack("!IIIII4dI", 2, algorithm, 1, width, height, 8e-6, 9e-6, width * 8e-6, height * 9e-6, 1)
     data += struct.pack("!6dI4d", 532e-9, 1, .2, 1, 0, 0, 1, 0, 0, 0, .3)
     data += struct.pack("!11dII", .05, 0, 0, 1, 0, 0, .05, 4, .5, .036, .024, 1920, 1080)
     data += struct.pack("!IQQ9dI", 1, 42, 9, 0, 0, 0, 1, .1, .02, .03, .8, -.2, 2 if mesh else 1)
@@ -29,13 +29,22 @@ def request(width=7, height=5, mesh=True):
 
 
 def reconstruction_request():
-    """Independent encoder: 224-byte CGHV 1.2 prefix, then raw SLM radians."""
+    """Independent encoder: 224-byte CGHV 1.4 prefix, then raw SLM radians."""
     data = struct.pack("!IIII4dI", 2, 1, 2, 2, 8e-6, 9e-6, 16e-6, 18e-6, 1)
     data += struct.pack("!6dI4d", 532e-9, 1, .2, 1, 0, 0, 1, 0, 0, 0, .3)
     data += struct.pack("!II9dQ", 3, 2, 3e-6, 5e-6, .2, -.01, .03, 0, 0, .6, .8, 4)
     assert len(data) == 224
     data += struct.pack("!4d", 1.0, -0.0, -7.5, 1.25e100)
     return data
+
+
+def camera_request():
+    data = reconstruction_request()[:136]
+    data = struct.pack("!I", 4) + data[4:]
+    data += struct.pack("!10dII2dIIQ", .2, -.01, .03, 0, 0, 1, 0, .015, 60, .2,
+                        3, 2, 3e-6, 5e-6, 11, 9, 4)
+    assert len(data) == 256
+    return data + struct.pack("!4d", 1.0, -0.0, -7.5, 1.25e100)
 
 
 def exact(sock, size):
@@ -50,7 +59,7 @@ def exact(sock, size):
 
 def receive(sock):
     magic, major, minor, kind, flags, reserved, identity, length = HEADER.unpack(exact(sock, HEADER.size))
-    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 2, 0, 0)
+    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 4, 0, 0)
     assert length <= 256 * 1024 * 1024
     return kind, identity, exact(sock, length)
 
@@ -114,11 +123,16 @@ def main(executable):
     server = Server(executable, "--solver", "dummy", "--io-timeout-ms", "300", "--max-clients", "8")
     try:
         solve(server, 1, fragment=True)
+        with server.connect() as sock:
+            sock.sendall(frame(1, 19, request(algorithm=3)))
+            check_result(*receive(sock), 19, 7, 5)  # InverseR dummy stays explicitly DummySuccess.
+        check_error(server, frame(1, 99, request(algorithm=2)))  # Reconstruction cannot use solver frames.
+        check_error(server, frame(1, 99, request(algorithm=4)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda identity: solve(server, identity), range(2, 18)))
-        for changes in ({"major": 2}, {"minor": 0}, {"minor": 1}, {"minor": 3}, {"flags": 1}, {"reserved": 1}):
+        for changes in ({"major": 2}, {"minor": 0}, {"minor": 1}, {"minor": 2}, {"minor": 3}, {"minor": 5}, {"flags": 1}, {"reserved": 1}):
             check_error(server, frame(1, 99, request(), **changes))
-        check_error(server, frame(8, 99))
+        check_error(server, frame(9, 99))
         check_error(server, frame(2, 99))
         check_error(server, frame(6, 99))  # A reconstruction result cannot start a job.
         assert "dummy" in check_error(server, frame(5, 99, reconstruction_request())).lower()
@@ -134,6 +148,14 @@ def main(executable):
         assert "observer" in check_error(server, frame(5, 99, bad_reconstruction)).lower()
         bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!II", bad_reconstruction, 136, 4096, 4096)
         check_error(server, frame(5, 99, bad_reconstruction))
+        check_error(server, frame(8, 99))  # A camera result cannot start a job.
+        assert "dummy" in check_error(server, frame(7, 99, camera_request())).lower()
+        check_error(server, frame(7, 99))
+        check_error(server, frame(7, 99, camera_request() + b"x"))
+        for offset, fmt, value in [(0, "I", 2), (248, "Q", 2**64-1), (240, "I", 2049),
+                                   (256, "d", float("nan")), (160, "d", float("inf"))]:
+            bad_camera = bytearray(camera_request()); struct.pack_into("!"+fmt, bad_camera, offset, value)
+            check_error(server, frame(7, 99, bad_camera))
         check_error(server, frame(1, 99, request() + b"x"))
         bad = bytearray(request()); struct.pack_into("!I", bad, 4, 77)
         check_error(server, frame(1, 99, bad))
@@ -143,7 +165,7 @@ def main(executable):
         check_error(server, frame(1, 99, bad))
         bad = bytearray(request()); struct.pack_into("!Q", bad, 344, 10)
         check_error(server, frame(1, 99, bad))
-        check_error(server, HEADER.pack(b"CGHV", 1, 2, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
+        check_error(server, HEADER.pack(b"CGHV", 1, 4, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
         check_error(server, frame(1, 99, request(16385, 1)))
         with server.connect() as sock:
             sock.sendall(frame(1, 100, request())[:40])

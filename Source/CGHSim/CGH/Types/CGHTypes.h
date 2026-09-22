@@ -100,32 +100,62 @@ struct CGHSIM_API FCGHLightParameters
 	double PolarizationAngleDeg = 0.0;
 };
 
-/** Source of truth for optics; the float-valued Cine Camera is only a preview. */
+/** Select which sensor dimensions are authoritative; the inactive values remain stored unchanged. */
+UENUM(BlueprintType)
+enum class ECGHCameraSensorSampling : uint8
+{
+	SensorSize UMETA(DisplayName = "Sensor Size"),
+	PixelPitch UMETA(DisplayName = "Pixel Pitch")
+};
+
+/** Source of truth for optics; the float-valued Cine Camera is only a derived geometric preview. */
 USTRUCT(BlueprintType)
 struct CGHSIM_API FCGHCameraParameters
 {
 	GENERATED_BODY()
 
+	/** Thin-lens focal length; the circular pupil diameter is focal length divided by f-number. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.001", Units = "mm"))
 	double FocalLengthMm = 50.0;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.001"))
 	double FNumber = 4.0;
 
+	/** Object-side focus distance measured from the lens. Must exceed focal length; sensor distance is f/(1-f/s). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.001", Units = "mm"))
 	double FocusDistanceMm = 500.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.001", Units = "mm"))
+	/** Sensor Size preserves existing sensor extents and derives pixel pitch. Pixel Pitch derives extents from pitch times resolution. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor")
+	ECGHCameraSensorSampling SensorSampling = ECGHCameraSensorSampling::SensorSize;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "0.001", Units = "mm", EditCondition = "SensorSampling == ECGHCameraSensorSampling::SensorSize"))
 	double SensorWidthMm = 36.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "0.001", Units = "mm"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "0.001", Units = "mm", EditCondition = "SensorSampling == ECGHCameraSensorSampling::SensorSize"))
 	double SensorHeightMm = 24.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "1"))
+	/** Sensor columns along lens-local +Y. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "1"))
 	int32 OutputResolutionX = 1920;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera", meta = (ClampMin = "1"))
+	/** Sensor rows along lens-local -Z. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "1"))
 	int32 OutputResolutionY = 1080;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "0.001", Units = "um", EditCondition = "SensorSampling == ECGHCameraSensorSampling::PixelPitch"))
+	double PixelPitchXUm = 18.75;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Sensor", meta = (ClampMin = "0.001", Units = "um", EditCondition = "SensorSampling == ECGHCameraSensorSampling::PixelPitch"))
+	double PixelPitchYUm = 22.2222222222222;
+
+	/** Midpoint integration columns across the circular pupil (1 to 2048). Coarse grids can alias optical phase; increase until the result converges. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Pupil Sampling", meta = (ClampMin = "1", ClampMax = "2048"))
+	int32 PupilResolutionX = 64;
+
+	/** Midpoint integration rows across the circular pupil (1 to 2048). More samples increase reconstruction cost. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Pupil Sampling", meta = (ClampMin = "1", ClampMax = "2048"))
+	int32 PupilResolutionY = 64;
 };
 
 /**
@@ -348,6 +378,23 @@ struct CGHSIM_API FCGHCameraDescription
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	int32 OutputResolutionY = 0;
+
+	/** Lens-local axes in the SLM frame. Optical +X faces the scene; sensor is behind the lens along -X. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
+	FQuat OpticalRotationSLM = FQuat::Identity;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (Units = "m"))
+	double PixelPitchXM = 0.0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera", meta = (Units = "m"))
+	double PixelPitchYM = 0.0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
+	int32 PupilResolutionX = 0;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
+	int32 PupilResolutionY = 0;
+
 };
 
 /**

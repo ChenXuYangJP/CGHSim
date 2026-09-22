@@ -9,4 +9,7 @@ namespace cgh::reconstruction::CudaReconstruction {
 // A failed/cancelled call leaves the output empty.
 bool Solve(const wire::ReconstructionRequest& request, wire::ReconstructionResult& result,
            std::string& error, const std::atomic<bool>& cancelled);
+// Two ordered RS-I stages with a finite circular paraxial thin lens.
+bool Solve(const wire::CameraReconstructionRequest& request, wire::CameraReconstructionResult& result,
+           std::string& error, const std::atomic<bool>& cancelled);
 }

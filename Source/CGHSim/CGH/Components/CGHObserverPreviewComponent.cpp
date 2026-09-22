@@ -2,6 +2,10 @@
 
 #if WITH_EDITOR
 #include "CGH/Actors/CGHObserverPlaneActor.h"
+#include "CGH/Actors/CGHCameraActor.h"
+#include "CineCameraComponent.h"
+#include "EditorViewportClient.h"
+#include "SEditorViewport.h"
 #include "CGH/Utils/CGHComplexFieldPreview.h"
 #include "Camera/CameraTypes.h"
 #include "Engine/Texture2D.h"
@@ -18,6 +22,40 @@
 
 namespace
 {
+struct FCGHFieldOwner
+{
+	AActor* Actor = nullptr;
+	const FCGHComplexField* Field = nullptr;
+	int32 ResolutionX = 0;
+	int32 ResolutionY = 0;
+	ECGHObserverPreviewMode Mode = ECGHObserverPreviewMode::Amplitude;
+	bool bHasField = false;
+	bool bCamera = false;
+	FString Error;
+};
+
+FCGHFieldOwner ReadFieldOwner(const UCGHObserverPreviewComponent* Component, bool bSynchronize = false)
+{
+	FCGHFieldOwner Out;
+	AActor* Owner = Component ? Component->GetOwner() : nullptr;
+	if (!IsValid(Owner) || Owner->IsActorBeingDestroyed()) { return Out; }
+	if (ACGHObserverPlaneActor* Observer = Cast<ACGHObserverPlaneActor>(Owner))
+	{
+		if (bSynchronize) { Observer->SynchronizeComplexField(); }
+		Out.Actor = Observer; Out.Field = &Observer->GetComplexField();
+		Out.ResolutionX = Observer->Parameters.ResolutionX; Out.ResolutionY = Observer->Parameters.ResolutionY;
+		Out.Mode = Observer->PreviewMode; Out.bHasField = Observer->HasValidComplexField(); Out.Error = Observer->ComplexFieldError;
+	}
+	else if (ACGHCameraActor* Camera = Cast<ACGHCameraActor>(Owner))
+	{
+		if (bSynchronize) { Camera->SynchronizeComplexField(); }
+		Out.Actor = Camera; Out.Field = &Camera->GetComplexField(); Out.bCamera = true;
+		Out.ResolutionX = Camera->Parameters.OutputResolutionX; Out.ResolutionY = Camera->Parameters.OutputResolutionY;
+		Out.Mode = Camera->PreviewMode; Out.bHasField = Camera->HasValidComplexField(); Out.Error = Camera->ComplexFieldError;
+	}
+	return Out;
+}
+
 /** A numerical image: linear bytes and no display-gamma conversion preserve the numerical grayscale mapping. */
 class SCGHFieldImage final : public SLeafWidget
 {
@@ -142,16 +180,9 @@ public:
 	}
 
 private:
-	ACGHObserverPlaneActor* GetObserver() const
-	{
-		const UCGHObserverPreviewComponent* Component = PreviewComponent.Get();
-		return Component ? Cast<ACGHObserverPlaneActor>(Component->GetOwner()) : nullptr;
-	}
-
 	ECGHObserverPreviewMode GetMode() const
 	{
-		const ACGHObserverPlaneActor* Observer = GetObserver();
-		return Observer ? Observer->PreviewMode : ECGHObserverPreviewMode::Amplitude;
+		return ReadFieldOwner(PreviewComponent.Get()).Mode;
 	}
 
 	FText GetModeText() const
@@ -171,12 +202,13 @@ private:
 
 	FText GetHeaderText() const
 	{
-		if (const ACGHObserverPlaneActor* Observer = GetObserver())
+		const FCGHFieldOwner Owner = ReadFieldOwner(PreviewComponent.Get());
+		if (Owner.Actor)
 		{
 			return FText::Format(NSLOCTEXT("CGH", "ObserverFieldHeader", "{0} | {1} x {2} px"),
 				GetModeText(),
-				FText::AsNumber(Observer->Parameters.ResolutionX, &FNumberFormattingOptions::DefaultNoGrouping()),
-				FText::AsNumber(Observer->Parameters.ResolutionY, &FNumberFormattingOptions::DefaultNoGrouping()));
+				FText::AsNumber(Owner.ResolutionX, &FNumberFormattingOptions::DefaultNoGrouping()),
+				FText::AsNumber(Owner.ResolutionY, &FNumberFormattingOptions::DefaultNoGrouping()));
 		}
 		return NSLOCTEXT("CGH", "ObserverFieldTitle", "Reconstructed field");
 	}
@@ -208,24 +240,111 @@ private:
 		{
 			return FText::FromString(Component->GetPreviewError());
 		}
-		if (const ACGHObserverPlaneActor* Observer = GetObserver())
+		const FCGHFieldOwner Owner = ReadFieldOwner(PreviewComponent.Get());
+		if (!Owner.Error.IsEmpty())
 		{
-			if (!Observer->ComplexFieldError.IsEmpty())
-			{
-				return Observer->HasValidComplexField()
-					? NSLOCTEXT("CGH", "ObserverPreviousField", "Input rejected; displaying previous valid field")
-					: FText::FromString(Observer->ComplexFieldError);
-			}
-			if (Observer->HasValidComplexField())
-			{
-				return NSLOCTEXT("CGH", "ObserverFieldReady", "Reconstructed complex field");
-			}
+			return Owner.bHasField
+				? NSLOCTEXT("CGH", "ObserverPreviousField", "Input rejected; displaying previous valid field")
+				: FText::FromString(Owner.Error);
 		}
-		return NSLOCTEXT("CGH", "ObserverFieldHint", "Assign this plane to a Workbench and click Reconstruct.");
+		if (Owner.bHasField) { return NSLOCTEXT("CGH", "ObserverFieldReady", "Reconstructed complex field"); }
+		return Owner.bCamera
+			? NSLOCTEXT("CGH", "CameraFieldHint", "Assign this camera to a Workbench, select Camera reconstruction, and click Reconstruct.")
+			: NSLOCTEXT("CGH", "ObserverFieldHint", "Assign this plane to a Workbench and click Reconstruct.");
 	}
 
 	TWeakObjectPtr<UCGHObserverPreviewComponent> PreviewComponent;
 	TSharedPtr<SCGHFieldImage> FieldImage;
+};
+
+/** Small read-only geometric view driven by the existing Cine Camera, created only when requested. */
+class FCGHCameraGeometricViewportClient final : public FEditorViewportClient
+{
+public:
+	FCGHCameraGeometricViewportClient(const TSharedRef<SEditorViewport>& Widget, ACGHCameraActor* InCamera)
+		: FEditorViewportClient(nullptr, nullptr, Widget), Camera(InCamera)
+	{
+		ViewportType = LVT_Perspective;
+		EngineShowFlags = FEngineShowFlags(ESFIM_Game);
+		bSetListenerPosition = false; bDrawAxes = false; bDisableInput = true;
+		SetRealtime(true);
+	}
+	virtual UWorld* GetWorld() const override { return Camera.IsValid() ? Camera->GetWorld() : FEditorViewportClient::GetWorld(); }
+	virtual void Tick(float DeltaSeconds) override
+	{
+		FEditorViewportClient::Tick(DeltaSeconds);
+		if (Camera.IsValid())
+		{
+			Camera->RefreshVisualization();
+			if (UCineCameraComponent* Cine = Camera->FindComponentByClass<UCineCameraComponent>())
+			{
+				Cine->GetCameraView(DeltaSeconds, ControllingActorViewInfo);
+				bUseControllingActorViewInfo = true;
+				SetViewLocation(ControllingActorViewInfo.Location); SetViewRotation(ControllingActorViewInfo.Rotation);
+				ViewFOV = ControllingActorViewInfo.FOV; AspectRatio = ControllingActorViewInfo.AspectRatio;
+			}
+		}
+	}
+private:
+	TWeakObjectPtr<ACGHCameraActor> Camera;
+};
+
+class SCGHCameraGeometricViewport final : public SEditorViewport
+{
+public:
+	SLATE_BEGIN_ARGS(SCGHCameraGeometricViewport) {}
+		SLATE_ARGUMENT(TWeakObjectPtr<ACGHCameraActor>, Camera)
+	SLATE_END_ARGS()
+	void Construct(const FArguments& Args) { Camera = Args._Camera; SEditorViewport::Construct(SEditorViewport::FArguments()); }
+protected:
+	virtual TSharedRef<FEditorViewportClient> MakeEditorViewportClient() override
+	{
+		return MakeShared<FCGHCameraGeometricViewportClient>(SharedThis(this), Camera.Get());
+	}
+private:
+	TWeakObjectPtr<ACGHCameraActor> Camera;
+};
+
+/** Native actor insets retain their custom widget, so switch the contents of that same widget in place. */
+class SCGHCameraPreviewSwitcher final : public SCompoundWidget
+{
+public:
+	SLATE_BEGIN_ARGS(SCGHCameraPreviewSwitcher) {}
+		SLATE_ARGUMENT(TWeakObjectPtr<UCGHObserverPreviewComponent>, PreviewComponent)
+	SLATE_END_ARGS()
+	void Construct(const FArguments& Args)
+	{
+		Component = Args._PreviewComponent;
+		FieldWidget = SNew(SCGHObserverFieldPreview).PreviewComponent(Component);
+		ChildSlot [ SAssignNew(Content, SBox) [ FieldWidget.ToSharedRef() ] ];
+		RefreshContent();
+	}
+	virtual void Tick(const FGeometry& Geometry, double Time, float DeltaTime) override
+	{
+		SCompoundWidget::Tick(Geometry, Time, DeltaTime);
+		RefreshContent();
+		if (Component.IsValid() && CurrentType == ECGHCameraPreviewType::OpticalField) { Component->RefreshPreviewTexture(); }
+	}
+private:
+	void RefreshContent()
+	{
+		ACGHCameraActor* Camera = Component.IsValid() ? Cast<ACGHCameraActor>(Component->GetOwner()) : nullptr;
+		if (!Camera || CurrentType == Camera->PreviewType) { return; }
+		CurrentType = Camera->PreviewType;
+		if (CurrentType == ECGHCameraPreviewType::Geometric)
+		{
+			if (GUsingNullRHI)
+			{
+				Content->SetContent(SNew(STextBlock).Text(NSLOCTEXT("CGH", "CameraGeometryNeedsRendering", "Geometric preview requires rendering")));
+			}
+			else { Content->SetContent(SNew(SCGHCameraGeometricViewport).Camera(Camera)); }
+		}
+		else { Content->SetContent(FieldWidget.ToSharedRef()); }
+	}
+	TWeakObjectPtr<UCGHObserverPreviewComponent> Component;
+	TSharedPtr<SWidget> FieldWidget;
+	TSharedPtr<SBox> Content;
+	ECGHCameraPreviewType CurrentType = ECGHCameraPreviewType::OpticalField;
 };
 }
 #endif
@@ -240,20 +359,30 @@ UCGHObserverPreviewComponent::UCGHObserverPreviewComponent()
 #if WITH_EDITOR
 bool UCGHObserverPreviewComponent::GetEditorPreviewInfo(float DeltaTime, FMinimalViewInfo& ViewOut)
 {
-	const ACGHObserverPlaneActor* Observer = Cast<ACGHObserverPlaneActor>(GetOwner());
-	if (!IsValid(Observer) || Observer->IsActorBeingDestroyed())
+	const FCGHFieldOwner Owner = ReadFieldOwner(this);
+	if (!Owner.Actor) { return false; }
+	if (ACGHCameraActor* Camera = Cast<ACGHCameraActor>(Owner.Actor))
 	{
-		return false;
+		if (Camera->PreviewType == ECGHCameraPreviewType::Geometric)
+		{
+			Camera->RefreshVisualization();
+			if (UCineCameraComponent* Cine = Camera->FindComponentByClass<UCineCameraComponent>())
+			{
+				// The Cine component stays inactive in editor so this component owns the inset.
+				Cine->GetCameraView(DeltaTime, ViewOut);
+				return true;
+			}
+		}
+		const FTransform Optical = Camera->GetOpticalTransform();
+		ViewOut.Location = Optical.GetLocation(); ViewOut.Rotation = Optical.Rotator();
 	}
-
-	// Metadata for the native preview frame; the custom Slate widget draws the canonical
-	// image (columns toward +Y/right, rows toward -Z/down), not this world camera view.
-	ViewOut.Location = Observer->GetActorLocation();
-	ViewOut.Rotation = Observer->GetActorRotation();
+	else
+	{
+		ViewOut.Location = Owner.Actor->GetActorLocation(); ViewOut.Rotation = Owner.Actor->GetActorRotation();
+	}
 	ViewOut.FOV = 90.0f;
-	// Bound only the native preview frame; the image independently fits the exact pixel-grid ratio.
-	const float GridAspectRatio = Observer->Parameters.ResolutionX > 0 && Observer->Parameters.ResolutionY > 0
-		? static_cast<float>(Observer->Parameters.ResolutionX) / Observer->Parameters.ResolutionY : 1.0f;
+	const float GridAspectRatio = Owner.ResolutionX > 0 && Owner.ResolutionY > 0
+		? static_cast<float>(Owner.ResolutionX) / Owner.ResolutionY : 1.0f;
 	ViewOut.AspectRatio = FMath::Clamp(GridAspectRatio, 0.5f, 2.0f);
 	ViewOut.bConstrainAspectRatio = true;
 	return true;
@@ -262,6 +391,7 @@ bool UCGHObserverPreviewComponent::GetEditorPreviewInfo(float DeltaTime, FMinima
 TSharedPtr<SWidget> UCGHObserverPreviewComponent::GetCustomEditorPreviewWidget()
 {
 	RefreshPreviewTexture();
+	if (Cast<ACGHCameraActor>(GetOwner())) { return SNew(SCGHCameraPreviewSwitcher).PreviewComponent(this); }
 	return SNew(SCGHObserverFieldPreview).PreviewComponent(this);
 }
 
@@ -277,20 +407,18 @@ void UCGHObserverPreviewComponent::InvalidatePreviewTexture()
 
 void UCGHObserverPreviewComponent::RefreshPreviewTexture()
 {
-	ACGHObserverPlaneActor* Observer = Cast<ACGHObserverPlaneActor>(GetOwner());
-	if (!IsValid(Observer) || Observer->IsActorBeingDestroyed())
+	const FCGHFieldOwner Owner = ReadFieldOwner(this, true);
+	if (!Owner.Actor || !Owner.Field)
 	{
 		PreviewTexture = nullptr;
 		return;
 	}
-
-	Observer->SynchronizeComplexField();
-	const int32 ResolutionX = Observer->Parameters.ResolutionX;
-	const int32 ResolutionY = Observer->Parameters.ResolutionY;
-	const uint64 Revision = Observer->GetComplexFieldRevision();
-	const bool bHasField = Observer->HasValidComplexField();
+	const int32 ResolutionX = Owner.ResolutionX;
+	const int32 ResolutionY = Owner.ResolutionY;
+	const uint64 Revision = Owner.Field->Revision;
+	const bool bHasField = Owner.bHasField;
 	if (CachedRevision == Revision && CachedResolutionX == ResolutionX && CachedResolutionY == ResolutionY
-		&& bCachedHasField == bHasField && CachedMode == Observer->PreviewMode)
+		&& bCachedHasField == bHasField && CachedMode == Owner.Mode)
 	{
 		return;
 	}
@@ -299,7 +427,7 @@ void UCGHObserverPreviewComponent::RefreshPreviewTexture()
 	CachedResolutionX = ResolutionX;
 	CachedResolutionY = ResolutionY;
 	bCachedHasField = bHasField;
-	CachedMode = Observer->PreviewMode;
+	CachedMode = Owner.Mode;
 	PreviewError.Reset();
 	if (!bHasField)
 	{
@@ -312,12 +440,12 @@ void UCGHObserverPreviewComponent::RefreshPreviewTexture()
 		&& (ResolutionX > MaximumTextureDimension || ResolutionY > MaximumTextureDimension))
 	{
 		PreviewTexture = nullptr;
-		PreviewError = TEXT("Observer resolution exceeds the graphics device's maximum texture dimensions.");
+		PreviewError = TEXT("Field resolution exceeds the graphics device's maximum texture dimensions.");
 		return;
 	}
 
 	TArray<FColor> Pixels;
-	if (!CGHComplexFieldPreview::BuildGrayscale(Observer->GetComplexField(), Observer->PreviewMode, Pixels, PreviewError))
+	if (!CGHComplexFieldPreview::BuildGrayscale(*Owner.Field, Owner.Mode, Pixels, PreviewError))
 	{
 		PreviewTexture = nullptr;
 		return;
@@ -328,7 +456,7 @@ void UCGHObserverPreviewComponent::RefreshPreviewTexture()
 		PreviewTexture = UTexture2D::CreateTransient(ResolutionX, ResolutionY, PF_B8G8R8A8);
 		if (!PreviewTexture)
 		{
-			PreviewError = TEXT("Could not allocate the observer field preview texture.");
+			PreviewError = TEXT("Could not allocate the complex field preview texture.");
 			return;
 		}
 		PreviewTexture->SRGB = false;

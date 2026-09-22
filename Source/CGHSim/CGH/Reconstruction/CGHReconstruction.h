@@ -2,7 +2,7 @@
 
 #include "CGH/Types/CGHReconstructionTypes.h"
 
-/** Double-precision scalar diffraction, independent of UObjects and rendering resources. */
+/** Double-precision scalar diffraction for observation planes and thin-lens camera sensors, independent of UObjects. */
 namespace CGHReconstruction
 {
 	/** Constant-work optical/geometry validation; does not traverse or require Pattern. */
@@ -27,6 +27,14 @@ namespace CGHReconstruction
 	 * The near-field term is retained. Convention agrees with PointFocus's exp(+i*k*r).
 	 * Reference: Makris and Psaltis, Optics Communications 284 (2011), Appendix A:
 	 * https://www.epfl.ch/labs/lo/wp-content/uploads/2018/08/OC_284_1686_Mar2011.pdf
+	 * Camera mode uses two passes of this same propagator: SLM to a sampled circular
+	 * pupil, then through exp(-i*k*(y*y+z*z)/(2*f)) to the sensor. Pupil diameter is
+	 * f/FNumber; the sensor is at f/(1-f/FocusDistance) behind optical-reference -X.
+	 * Camera +X looks toward the SLM, and the full optical-reference quaternion defines
+	 * pupil/sensor roll. The sensor retains raw local +Y/-Z sample order (an inverted
+	 * optical image). This ideal thin lens is paraxial and requires converged pupil sampling.
+	 * No lens aberration, detector noise, color response, or sensor-pixel integration is modeled.
+	 * Thin-lens phase and image-distance reference: https://qiweb.tudelft.nl/aoi/coherentimaging/coherentimaging/
 	 * Cancellation is checked during validation, preparation and inner source loops.
 	 * Failure/cancellation returns a diagnostic and an empty field.
 	 */

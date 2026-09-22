@@ -206,7 +206,7 @@ namespace
 	};
 
 
-	/** Independent CGHV 1.2 bytes expose decoder errors that a shared encoder could conceal. */
+	/** Independent CGHV 1.4 bytes expose decoder errors that a shared encoder could conceal. */
 	struct FCGHScriptedPeer
 	{
 		ISocketSubsystem* Subsystem = nullptr;
@@ -253,7 +253,7 @@ namespace
 			return Offset == Size;
 		}
 
-		bool Start(FAutomationTestBase& Test, int32 ResponseCase)
+		bool Start(FAutomationTestBase& Test, int32 ResponseCase, uint8 ExpectedAlgorithm = 1, uint8 ResultStatus = 1)
 		{
 			Subsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
 			if (!Test.TestNotNull(TEXT("Scripted TCP peer has a socket subsystem"), Subsystem))
@@ -270,7 +270,7 @@ namespace
 				return false;
 			}
 			Port = Listener->GetPortNo();
-			Worker = Async(EAsyncExecution::Thread, [this, ResponseCase]()
+			Worker = Async(EAsyncExecution::Thread, [this, ResponseCase, ExpectedAlgorithm, ResultStatus]()
 			{
 				const double Deadline = FPlatformTime::Seconds() + 4.0;
 				FSocket* Client = nullptr;
@@ -300,7 +300,10 @@ namespace
 					{
 						TArray<uint8> RequestPayload;
 						RequestPayload.SetNumUninitialized(static_cast<int32>(PayloadSize));
-						bReceivedRequest = Transfer(*Client, RequestPayload.GetData(), RequestPayload.Num(), false, Deadline);
+						bReceivedRequest = Transfer(*Client, RequestPayload.GetData(), RequestPayload.Num(), false, Deadline)
+							&& RequestHeader[5] == 1 && RequestHeader[7] == 4 && RequestHeader[9] == 1
+							&& RequestPayload.Num() >= 12 && RequestPayload[4] == 0 && RequestPayload[5] == 0
+							&& RequestPayload[6] == 0 && RequestPayload[7] == ExpectedAlgorithm;
 					}
 				}
 				if (bReceivedRequest)
@@ -310,11 +313,11 @@ namespace
 					Reply.Init(0, 32 + 32 + 15 * 8);
 					Reply[0] = 'C'; Reply[1] = 'G'; Reply[2] = 'H'; Reply[3] = 'V';
 					Reply[5] = 1; // major 1
-					Reply[7] = 2; // minor 2
+					Reply[7] = 4; // minor 4
 					Reply[9] = 2; // Result
 					FMemory::Memcpy(Reply.GetData() + 16, RequestHeader + 16, 8);
 					Reply[31] = 32 + 15 * 8;
-					Reply[35] = 1; // DummySuccess
+					Reply[35] = ResultStatus; // Explicit dummy or algorithm-specific numerical status.
 					Reply[39] = 1; // ExpPositiveIKR
 					Reply[43] = 5; Reply[47] = 3;
 					Reply[63] = 15;
@@ -328,7 +331,7 @@ namespace
 					case 6: Reply.SetNum(72); break; // Truncated body, unchanged advertised length.
 					case 7: Reply[29] = 1; break; // Payload exceeds the requested output size.
 					case 8: Reply[48] = 0x7f; Reply[49] = 0xf0; break; // Infinite compute duration.
-					case 9: Reply[7] = 3; break; // Unsupported future protocol minor.
+					case 9: Reply[7] = 5; break; // Unsupported future protocol minor.
 					case 10: Reply[35] = 3; break; // Unsupported result status.
 					}
 					Transfer(*Client, Reply.GetData(), Reply.Num(), true, Deadline);
@@ -448,6 +451,56 @@ bool FCGHDockerMalformedResponseTest::RunTest(const FString& Parameters)
 				Scene.Solver->StatusMessage.Contains(Diagnostics[ResponseCase]));
 			TestEqual(TEXT("Malformed reception cannot overwrite the current phase revision"), Scene.SLM->GetPhasePatternRevision(), BeforeRevision);
 			TestEqual(TEXT("Malformed reception never publishes partial phase values"), Scene.SLM->GetPhasePattern().PhaseRad[0], 0.125);
+		}
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHDockerAlgorithmStatusTest,
+	"CGH.DockerBackend.AlgorithmStatusMustMatchRequest",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHDockerAlgorithmStatusTest::RunTest(const FString& Parameters)
+{
+	struct FCase
+	{
+		ECGHSolverAlgorithm Algorithm;
+		uint8 WireAlgorithm;
+		uint8 Status;
+		bool bAccepted;
+	};
+	const FCase Cases[] = {
+		{ECGHSolverAlgorithm::PointFocus, 1, 2, true},
+		{ECGHSolverAlgorithm::PointFocusInverseR, 3, 4, true},
+		{ECGHSolverAlgorithm::PointFocus, 1, 4, false},
+		{ECGHSolverAlgorithm::PointFocusInverseR, 3, 2, false},
+		{ECGHSolverAlgorithm::PointFocus, 1, 3, false},
+		{ECGHSolverAlgorithm::PointFocusInverseR, 3, 3, false},
+		{ECGHSolverAlgorithm::PointFocus, 1, 1, true},
+		{ECGHSolverAlgorithm::PointFocusInverseR, 3, 1, true},
+	};
+	for (const FCase& Case : Cases)
+	{
+		FCGHScriptedPeer Peer;
+		FCGHDockerTestScene Scene;
+		if (!Peer.Start(*this, 0, Case.WireAlgorithm, Case.Status) || !Scene.Initialize(*this, Peer.Port)) return false;
+		Scene.Solver->Parameters.Algorithm = Case.Algorithm;
+		const uint64 Revision = Scene.SLM->GetPhasePatternRevision();
+		if (!TestTrue(TEXT("Algorithm-specific request starts"), Scene.Solver->StartSolve())
+			|| !WaitForDockerActor(*this, *Scene.Solver)) return false;
+		TestTrue(TEXT("The independent peer observes the explicitly mapped wire algorithm"), Peer.Worker.Get());
+		if (Case.bAccepted)
+		{
+			TestTrue(TEXT("A matching computed result or explicit dummy is accepted"), Scene.Solver->JobState == ECGHSolverJobState::Ready);
+			TestEqual(TEXT("Accepted algorithm result publishes once"), Scene.SLM->GetPhasePatternRevision(), Revision + 1);
+			TestEqual(TEXT("Dummy status stays explicit for either algorithm"), Scene.Solver->StatusMessage.Contains(TEXT("dummy")), Case.Status == 1);
+		}
+		else
+		{
+			TestTrue(TEXT("Mismatched solver or reconstruction status is rejected"), Scene.Solver->JobState == ECGHSolverJobState::Failed);
+			TestTrue(TEXT("Mismatch supplies a status diagnostic"), Scene.Solver->StatusMessage.Contains(TEXT("status")));
+			TestEqual(TEXT("Mismatched status cannot advance publication"), Scene.SLM->GetPhasePatternRevision(), Revision);
+			TestEqual(TEXT("Mismatched status preserves previous samples"), Scene.SLM->GetPhasePattern().PhaseRad[0], 0.125);
 		}
 	}
 	return true;

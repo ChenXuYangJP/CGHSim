@@ -23,14 +23,14 @@ void CheckReconstructionWire() {
     std::vector<std::uint8_t> bytes;
     std::atomic<bool> cancelled{true};
     w::Header header; header.request_id = 123;
-    for (const auto type : {w::Type::ReconstructionRequest, w::Type::ReconstructionResult}) {
+    for (const auto type : {w::Type::ReconstructionRequest, w::Type::ReconstructionResult, w::Type::CameraReconstructionRequest, w::Type::CameraReconstructionResult}) {
         header.type = type;
         CHECK(w::EncodeHeader(header, bytes, error));
-        CHECK(bytes[7] == 2 && bytes[9] == static_cast<std::uint8_t>(type));
+        CHECK(bytes[7] == 4 && bytes[9] == static_cast<std::uint8_t>(type));
         w::Header decoded;
         CHECK(w::DecodeHeader(bytes.data(), bytes.size(), decoded, error) && decoded.type == type);
     }
-    header.type = static_cast<w::Type>(7); CHECK(!w::EncodeHeader(header, bytes, error));
+    header.type = static_cast<w::Type>(9); CHECK(!w::EncodeHeader(header, bytes, error));
     CHECK(w::kMaxReconstructionPixels == 16777214);
     CHECK(w::ValidDimensions(4096, 4096));
     CHECK(!w::ValidReconstructionDimensions(4096, 4096));
@@ -73,6 +73,7 @@ void CheckReconstructionWire() {
         CHECK(!w::DecodeReconstructionRequest(invalid.data(), invalid.size(), decoded_request, error));
     };
     reject_request_u32(0, 1); // PointFocus is not a reconstruction algorithm.
+    reject_request_u32(0, 3); // InverseR is not a reconstruction algorithm either.
     reject_request_u32(4, 2);
     reject_request_u32(8, 16385);
     reject_request_u32(48, 99);
@@ -124,7 +125,7 @@ void CheckReconstructionWire() {
         damaged = result_bytes; PutU64(damaged, 24, count);
         CHECK(!w::DecodeReconstructionResult(damaged.data(), damaged.size(), decoded_result, error));
     }
-    for (std::uint32_t status : {1u, 2u, 4u}) {
+    for (std::uint32_t status : {1u, 2u, 4u, 5u}) {
         damaged = result_bytes; PutU32(damaged, 0, status);
         CHECK(!w::DecodeReconstructionResult(damaged.data(), damaged.size(), decoded_result, error));
     }
@@ -149,19 +150,97 @@ void CheckReconstructionWire() {
     CHECK(!w::DecodeResult(result_bytes.data(), result_bytes.size(), old_result, error));
 }
 
+void CheckCameraWire() {
+    std::string error;
+    std::vector<std::uint8_t> bytes;
+    w::CameraReconstructionRequest request;
+    request.slm = {2, 2, 8e-6, 9e-6, 16e-6, 18e-6, w::Modulation::PhaseOnly};
+    request.light.wavelength_m = 532e-9; request.light.amplitude = 0.7;
+    request.light.direction_slm = {1, 0, 0};
+    auto& c = request.camera;
+    c.optical_position_slm_m = {.2, -.01, .03}; c.optical_rotation_slm = {0, 0, 1, 0};
+    c.focal_length_m = .015; c.f_number = 60; c.focus_distance_m = .2;
+    c.output_resolution_x = 3; c.output_resolution_y = 2;
+    c.pixel_pitch_x_m = 3e-6; c.pixel_pitch_y_m = 5e-6;
+    c.pupil_resolution_x = 11; c.pupil_resolution_y = 9;
+    request.phase_radians = {1, -0.0, -7.5, 1.25e100};
+    CHECK(w::EncodeCameraReconstructionRequest(request, bytes, error));
+    CHECK(bytes.size() == 256 + 32 && bytes[3] == 4 && bytes[219] == 3 && bytes[223] == 2);
+    CHECK(bytes[243] == 11 && bytes[247] == 9 && bytes[255] == 4 && bytes[264] == 0x80);
+    const auto request_bytes = bytes;
+    w::CameraReconstructionRequest decoded;
+    CHECK(w::DecodeCameraReconstructionRequest(bytes.data(), bytes.size(), decoded, error));
+    CHECK(decoded.camera.optical_rotation_slm.z == 1 && decoded.camera.focal_length_m == .015);
+    CHECK(decoded.camera.pupil_resolution_x == 11 && decoded.camera.pixel_pitch_y_m == 5e-6);
+    CHECK(decoded.phase_radians == request.phase_radians && std::signbit(decoded.phase_radians[1]));
+    CHECK(w::EncodeCameraReconstructionRequest(decoded, bytes, error) && bytes == request_bytes);
+    for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeCameraReconstructionRequest(bytes.data(), n, decoded, error));
+    auto damaged = bytes; damaged.push_back(0);
+    CHECK(!w::DecodeCameraReconstructionRequest(damaged.data(), damaged.size(), decoded, error));
+    for (std::size_t offset : {std::size_t(0), std::size_t(4), std::size_t(8), std::size_t(216), std::size_t(240)}) {
+        damaged = request_bytes; PutU32(damaged, offset, 99999);
+        CHECK(!w::DecodeCameraReconstructionRequest(damaged.data(), damaged.size(), decoded, error));
+    }
+    for (std::size_t offset : {std::size_t(136), std::size_t(160), std::size_t(192), std::size_t(200), std::size_t(208), std::size_t(224), std::size_t(256)}) {
+        damaged = request_bytes; PutF64(damaged, offset, std::numeric_limits<double>::quiet_NaN());
+        CHECK(!w::DecodeCameraReconstructionRequest(damaged.data(), damaged.size(), decoded, error));
+    }
+    for (std::uint64_t count : {std::uint64_t(0), std::uint64_t(3), std::numeric_limits<std::uint64_t>::max()}) {
+        damaged = request_bytes; PutU64(damaged, 248, count);
+        CHECK(!w::DecodeCameraReconstructionRequest(damaged.data(), damaged.size(), decoded, error));
+    }
+    CHECK(decoded.phase_radians == request.phase_radians);
+    CHECK(w::ValidPupilDimensions(2048, 2048) && !w::ValidPupilDimensions(2049, 1) && !w::ValidPupilDimensions(1, 0));
+    w::ReconstructionRequest observer;
+    CHECK(!w::DecodeReconstructionRequest(request_bytes.data(), request_bytes.size(), observer, error));
+    std::atomic<bool> cancelled{true};
+    CHECK(!w::EncodeCameraReconstructionRequest(request, bytes, error, &cancelled) && bytes.empty());
+    CHECK(!w::DecodeCameraReconstructionRequest(request_bytes.data(), request_bytes.size(), decoded, error, &cancelled));
+    c.focus_distance_m = c.focal_length_m;
+    CHECK(!w::EncodeCameraReconstructionRequest(request, bytes, error));
+
+    w::CameraReconstructionResult result;
+    result.resolution_x = 2; result.resolution_y = 1; result.compute_seconds = .125;
+    result.samples = {{1, -2}, {-0.0, 1e-100}};
+    CHECK(w::EncodeCameraReconstructionResult(result, bytes, error));
+    CHECK(bytes.size() == 64 && bytes[3] == 5 && bytes[31] == 2 && bytes[48] == 0x80);
+    const auto result_bytes = bytes;
+    w::CameraReconstructionResult output;
+    CHECK(w::DecodeCameraReconstructionResult(bytes.data(), bytes.size(), output, error));
+    CHECK(output.samples[0].imaginary == -2 && std::signbit(output.samples[1].real));
+    CHECK(w::EncodeCameraReconstructionResult(output, bytes, error) && bytes == result_bytes);
+    for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeCameraReconstructionResult(bytes.data(), n, output, error));
+    for (std::uint32_t status : {1u, 2u, 3u, 4u}) {
+        damaged = result_bytes; PutU32(damaged, 0, status);
+        CHECK(!w::DecodeCameraReconstructionResult(damaged.data(), damaged.size(), output, error));
+    }
+    damaged = result_bytes; PutU64(damaged, 24, std::numeric_limits<std::uint64_t>::max());
+    CHECK(!w::DecodeCameraReconstructionResult(damaged.data(), damaged.size(), output, error));
+    damaged = result_bytes; PutF64(damaged, 32, std::numeric_limits<double>::infinity());
+    CHECK(!w::DecodeCameraReconstructionResult(damaged.data(), damaged.size(), output, error));
+    CHECK(output.samples.size() == 2 && output.samples[0].imaginary == -2);
+    CHECK(!w::EncodeCameraReconstructionResult(result, bytes, error, &cancelled) && bytes.empty());
+    CHECK(!w::DecodeCameraReconstructionResult(result_bytes.data(), result_bytes.size(), output, error, &cancelled));
+    w::ReconstructionResult observer_result; w::Result solver_result;
+    CHECK(!w::DecodeReconstructionResult(result_bytes.data(), result_bytes.size(), observer_result, error));
+    CHECK(!w::DecodeResult(result_bytes.data(), result_bytes.size(), solver_result, error));
+}
+
 int main() {
     std::string error;
     std::vector<std::uint8_t> bytes;
     w::Header h; h.request_id = 0x0102030405060708ull; h.payload_size = 0x01020304;
     CHECK(w::EncodeHeader(h, bytes, error));
-    CHECK(bytes.size() == 32 && bytes[0] == 'C' && bytes[3] == 'V' && bytes[5] == 1 && bytes[7] == 2);
+    CHECK(bytes.size() == 32 && bytes[0] == 'C' && bytes[3] == 'V' && bytes[5] == 1 && bytes[7] == 4);
     CHECK(bytes[16] == 1 && bytes[23] == 8 && bytes[28] == 1 && bytes[31] == 4);
     w::Header decoded_header;
     CHECK(w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
     for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeHeader(bytes.data(), n, decoded_header, error));
     bytes[7] = 0; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
     bytes[7] = 1; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
-    bytes[7] = 3; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error)); bytes[7] = 2;
+    bytes[7] = 2; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
+    bytes[7] = 3; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
+    bytes[7] = 5; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error)); bytes[7] = 4;
     bytes[11] = 1; CHECK(!w::DecodeHeader(bytes.data(), bytes.size(), decoded_header, error));
     h.payload_size = w::kMaxPayloadBytes + 1; CHECK(!w::EncodeHeader(h, bytes, error));
     h.payload_size = 1; h.type = w::Type::Cancel; CHECK(!w::EncodeHeader(h, bytes, error));
@@ -186,6 +265,14 @@ int main() {
     q.point_clouds[0].points[0].amplitude = std::numeric_limits<double>::quiet_NaN(); CHECK(!w::EncodeRequest(q, damaged, error)); q.point_clouds[0].points[0].amplitude = .2;
     q.slm.resolution_x = 16385; CHECK(!w::EncodeRequest(q, damaged, error)); q.slm.resolution_x = 7;
     q.algorithm = w::Algorithm::ObserverPlaneReconstruction; CHECK(!w::EncodeRequest(q, damaged, error)); q.algorithm = w::Algorithm::PointFocus;
+    q.algorithm = w::Algorithm::PointFocusInverseR;
+    CHECK(w::EncodeRequest(q, damaged, error));
+    CHECK(damaged.size() == bytes.size() && damaged[7] == 3);
+    CHECK(w::DecodeRequest(damaged.data(), damaged.size(), decoded, error));
+    CHECK(decoded.algorithm == w::Algorithm::PointFocusInverseR && decoded.point_clouds[0].points[0].amplitude == .2);
+    damaged[7] = 1; CHECK(damaged == bytes); // Algorithm field is the only layout change.
+    q.algorithm = static_cast<w::Algorithm>(4); CHECK(!w::EncodeRequest(q, damaged, error));
+    q.algorithm = w::Algorithm::PointFocus;
     std::atomic<bool> cancelled{true}; CHECK(!w::EncodeRequest(q, damaged, error, &cancelled));
     CHECK(!w::DecodeRequest(bytes.data(), bytes.size(), decoded, error, &cancelled));
 
@@ -197,6 +284,13 @@ int main() {
     CHECK(w::EncodeResult(result, bytes, error));
     CHECK(w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error));
     CHECK(decoded_result.status == w::Status::PointFocusSuccess && decoded_result.phase_radians[3] == 6);
+    result.status = w::Status::PointFocusInverseRSuccess;
+    CHECK(w::EncodeResult(result, bytes, error)); CHECK(bytes[3] == 4 && bytes.size() == 64);
+    CHECK(w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error));
+    CHECK(decoded_result.status == w::Status::PointFocusInverseRSuccess && decoded_result.phase_radians[3] == 6);
+    result.status = w::Status::ReconstructionSuccess; CHECK(!w::EncodeResult(result, damaged, error));
+    damaged = bytes; damaged[3] = 3; CHECK(!w::DecodeResult(damaged.data(), damaged.size(), decoded_result, error));
+    result.status = w::Status::PointFocusInverseRSuccess;
     for (std::size_t n = 0; n < bytes.size(); ++n) CHECK(!w::DecodeResult(bytes.data(), n, decoded_result, error));
     CHECK(!w::DecodeResult(bytes.data(), bytes.size(), decoded_result, error, &cancelled));
     damaged = bytes; damaged[3] = 99; CHECK(!w::DecodeResult(damaged.data(), damaged.size(), decoded_result, error));
@@ -208,5 +302,6 @@ int main() {
     std::string message; CHECK(w::DecodeError(bytes.data(), bytes.size(), message, error)); CHECK(message == "Protocol failure");
     bytes.push_back(0); CHECK(!w::DecodeError(bytes.data(), bytes.size(), message, error));
     CheckReconstructionWire();
+    CheckCameraWire();
     std::cout << "wire codec checks passed\n";
 }

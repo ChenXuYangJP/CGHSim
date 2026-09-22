@@ -177,7 +177,7 @@ namespace CGHComplexFieldIOPrivate
 
 bool CGHComplexFieldIO::Save(const FCGHComplexField& Field, double PixelPitchXM, double PixelPitchYM,
 	const FString& AssetFolder, const FString& RawDirectory, const FText& Label,
-	FCGHComplexFieldSaveResult& Out)
+	FCGHComplexFieldSaveResult& Out, ECoordinateFrame CoordinateFrame)
 {
 	Out = FCGHComplexFieldSaveResult();
 #if !WITH_EDITOR
@@ -187,6 +187,11 @@ bool CGHComplexFieldIO::Save(const FCGHComplexField& Field, double PixelPitchXM,
 	if (!IsInGameThread())
 	{
 		Out.Error = TEXT("Complex-field saving must run on the game thread.");
+		return false;
+	}
+	if (CoordinateFrame != ECoordinateFrame::ObserverPlane && CoordinateFrame != ECoordinateFrame::CameraSensor)
+	{
+		Out.Error = TEXT("Unknown complex-field coordinate frame.");
 		return false;
 	}
 	if (!Field.IsValid(&Out.Error))
@@ -227,7 +232,7 @@ bool CGHComplexFieldIO::Save(const FCGHComplexField& Field, double PixelPitchXM,
 	IFileManager& Files = IFileManager::Get();
 	for (int32 Attempt = 0; Attempt < 8; ++Attempt)
 	{
-		Name = TEXT("ObserverField_") + FDateTime::UtcNow().ToString(TEXT("%Y%m%d_%H%M%S"))
+		Name = FString(CoordinateFrame == ECoordinateFrame::CameraSensor ? TEXT("CameraField_") : TEXT("ObserverField_")) + FDateTime::UtcNow().ToString(TEXT("%Y%m%d_%H%M%S"))
 			+ TEXT("_") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
 		PackageName = Folder / Name;
 		if (!FPackageName::TryConvertLongPackageNameToFilename(PackageName, Result.AssetFilename, FPackageName::GetAssetPackageExtension()))
@@ -330,12 +335,24 @@ bool CGHComplexFieldIO::Save(const FCGHComplexField& Field, double PixelPitchXM,
 	Metadata->SetStringField(TEXT("index"), TEXT("row * resolution_x + column"));
 	Metadata->SetNumberField(TEXT("pixel_pitch_x_m"), PixelPitchXM);
 	Metadata->SetNumberField(TEXT("pixel_pitch_y_m"), PixelPitchYM);
-	Metadata->SetStringField(TEXT("coordinate_frame"), TEXT("observer-local"));
+	Metadata->SetStringField(TEXT("coordinate_frame"), CoordinateFrame == ECoordinateFrame::CameraSensor ? TEXT("camera-sensor-local") : TEXT("observer-local"));
 	Metadata->SetStringField(TEXT("pixel_center_convention"), TEXT("centered"));
-	Metadata->SetStringField(TEXT("optical_normal_observer"), TEXT("+X"));
 	Metadata->SetNumberField(TEXT("pixel_plane_x_m"), 0.0);
-	Metadata->SetStringField(TEXT("column_direction_observer"), TEXT("+Y"));
-	Metadata->SetStringField(TEXT("row_direction_observer"), TEXT("-Z"));
+	Metadata->SetStringField(TEXT("column_direction"), TEXT("+Y"));
+	Metadata->SetStringField(TEXT("row_direction"), TEXT("-Z"));
+	if (CoordinateFrame == ECoordinateFrame::CameraSensor)
+	{
+		Metadata->SetStringField(TEXT("coordinate_origin"), TEXT("sensor center"));
+		Metadata->SetStringField(TEXT("optical_normal_sensor"), TEXT("+X (toward lens)"));
+		Metadata->SetStringField(TEXT("column_direction_sensor"), TEXT("+Y"));
+		Metadata->SetStringField(TEXT("row_direction_sensor"), TEXT("-Z"));
+	}
+	else
+	{
+		Metadata->SetStringField(TEXT("optical_normal_observer"), TEXT("+X"));
+		Metadata->SetStringField(TEXT("column_direction_observer"), TEXT("+Y"));
+		Metadata->SetStringField(TEXT("row_direction_observer"), TEXT("-Z"));
+	}
 	Metadata->SetStringField(TEXT("field_label"), Label.ToString());
 	FString Json;
 	if (!FJsonSerializer::Serialize(Metadata, TJsonWriterFactory<>::Create(&Json)))
