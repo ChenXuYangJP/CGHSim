@@ -272,7 +272,7 @@ bool EncodeInput(const FWorkerContext& Context, std::vector<uint8_t>& Payload, F
 	if (Input.Algorithm != ECGHSolverAlgorithm::PointFocus ||
 		Input.PropagationConvention != ECGHPropagationConvention::ExpPositiveIKR)
 	{
-		Error = TEXT("Docker protocol 1.1 does not support this algorithm or propagation convention.");
+		Error = TEXT("Docker protocol 1.2 does not support this algorithm or propagation convention.");
 		return false;
 	}
 	if (Scene.SchemaVersion != 2 || Scene.SLM.ResolutionX < 1 || Scene.SLM.ResolutionY < 1 ||
@@ -461,7 +461,7 @@ FCGHSolverResult RunJob(const FCGHSolverJob& Job, const FCGHDockerSolverSettings
 		return Failure(TEXT("Docker solver response job ID or message type does not match the request."));
 	}
 	const uint64 PixelCount = static_cast<uint64>(Job.Input.Scene.SLM.ResolutionX) * Job.Input.Scene.SLM.ResolutionY;
-	// 1.1 result: fixed 32-byte metadata + one binary64 per pixel. Reject before allocating.
+	// 1.2 PointFocus result: fixed 32-byte metadata + one binary64 per pixel. Reject before allocating.
 	if ((ResponseHeader.type == Wire::Type::Result && ResponseHeader.payload_size != 32 + PixelCount * 8) ||
 		(ResponseHeader.type == Wire::Type::Error &&
 			(ResponseHeader.payload_size < 5 || ResponseHeader.payload_size > Wire::kMaxErrorBytes + 4)))

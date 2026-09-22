@@ -184,10 +184,11 @@ bool FCGHReconstructorCancellationTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Cancellation leaves idle status"), Scene.Reconstructor->JobState == ECGHReconstructionJobState::Idle);
 	TestEqual(TEXT("Cancellation preserves previous field"), Scene.Observer->GetComplexFieldRevision(), Revision);
 	Scene.Reconstructor->Parameters.ReconstructionBackend = ECGHReconstructionBackend::Docker;
-	TestTrue(TEXT("Docker placeholder accepts a request"), Scene.Reconstructor->StartReconstruction());
+	Scene.Reconstructor->Parameters.Docker.Port = 0;
+	TestTrue(TEXT("Docker transport accepts an asynchronous request"), Scene.Reconstructor->StartReconstruction());
 	if (!WaitForReconstructor(*this, *Scene.Reconstructor)) return false;
 	TestTrue(TEXT("Docker fails explicitly"), Scene.Reconstructor->JobState == ECGHReconstructionJobState::Failed);
-	TestTrue(TEXT("Docker explains missing implementation"), Scene.Reconstructor->StatusMessage.Contains(TEXT("not implemented")));
+	TestTrue(TEXT("Docker explains invalid endpoint settings"), Scene.Reconstructor->StatusMessage.Contains(TEXT("port")));
 	Scene.Reconstructor->Parameters.ReconstructionBackend = ECGHReconstructionBackend::CPU;
 	Scene.Reconstructor->Parameters.Mode = ECGHReconstructionMode::Camera;
 	TestFalse(TEXT("Camera mode cannot start an unsupported optical path"), Scene.Reconstructor->StartReconstruction());
@@ -220,10 +221,12 @@ bool FCGHReconstructorAutoTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Runtime ticks publish the initial field"), Scene.Reconstructor->JobState == ECGHReconstructionJobState::Ready);
 	const int64 InitialJob = Scene.Reconstructor->JobId;
 	Scene.Observer->PreviewMode = ECGHObserverPreviewMode::Phase;
+	Scene.Reconstructor->Parameters.Docker.Port += 1;
+	Scene.Reconstructor->Parameters.Docker.RequestTimeoutSeconds += 1.0;
 	Scene.Light->Parameters.PolarizationAngleDeg += 20.0;
 	Scene.Light->AddActorWorldOffset(FVector(1.0, 2.0, 3.0));
 	for (int32 Tick = 0; Tick < 4; ++Tick) Scene.TickTestWorld();
-	TestEqual(TEXT("Presentation and unused plane-wave inputs do not restart work"), Scene.Reconstructor->JobId, InitialJob);
+	TestEqual(TEXT("Presentation, unused Docker settings, and unused plane-wave inputs do not restart CPU work"), Scene.Reconstructor->JobId, InitialJob);
 	Scene.SetPhase(*this, 1.0);
 	Scene.TickTestWorld();
 	if (!WaitForReconstructor(*this, *Scene.Reconstructor, &Scene)) return false;

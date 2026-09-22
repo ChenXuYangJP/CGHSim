@@ -1,6 +1,6 @@
 # Optical reconstruction on an observer plane
 
-`ACGHReconstructorActor` reconstructs the complex optical field from an SLM phase pattern and reconstruction light, then publishes one complex value per pixel to `ACGHObserverPlaneActor`. The CPU backend runs the numerical propagation asynchronously. **Docker reconstruction** and **camera/lens reconstruction** are selectable extension points and report that they are not implemented.
+`ACGHReconstructorActor` reconstructs the complex optical field from an SLM phase pattern and reconstruction light, then publishes one complex value per pixel to `ACGHObserverPlaneActor`. The CPU backend runs numerical propagation asynchronously; **Docker (TCP/CUDA)** sends the same optical task to the shared V100 service and receives a full-precision complex field. **Camera/lens reconstruction** remains unimplemented.
 
 ## Editor setup
 
@@ -24,20 +24,30 @@ SLM active phase + reconstruction light + observer sampling geometry
     -> Reconstructor captures owned phase snapshot [at launch]
     -> UCGHReconstructionBackend
        -> CPU: UCGHCPUReconstructionBackend          [thread pool]
-       -> Docker: reserved, not implemented
+       -> Docker: TCP -> V100 CUDA Rayleigh–Sommerfeld reconstruction
     -> FCGHReconstructionResult / FCGHComplexField
     -> Reconstructor.PollReconstructor()            [game thread]
     -> ObserverPlane.SetComplexField()
     -> selected-observer phase/amplitude/intensity preview
 ```
 
-The worker receives plain owned values and never reads scene actors or other UObjects. Metadata comparison does not copy the SLM phase array on every tick. Workbench optical capture also avoids rebuilding target meshes or point clouds. The observer description stays outside `FCGHSceneDescription`, preserving the solver's scene schema and Docker protocol.
+The worker receives plain owned values and never reads scene actors or other UObjects. Metadata comparison does not copy the SLM phase array on every tick. Workbench optical capture also avoids rebuilding target meshes or point clouds. The observer description stays outside `FCGHSceneDescription`, preserving the solver's scene schema. CGHV 1.2 adds separate reconstruction messages; the existing PointFocus payload layout remains unchanged.
 
 Jobs use **Idle**, **Queued**, **Running**, **Ready**, and **Failed** states. A newer request replaces the latest queued request and requests cancellation of the running worker. Cancellation is cooperative; cancelling or destroying the actor does not wait for the numerical loop. Publication occurs on the game thread after the result completes and the consumed actor references, optical metadata, SLM phase revision, and destination field revision still match. Replacing or deleting an input actor, editing the sampling geometry, or intervening phase/field publication prevents an old result from overwriting current data.
 
 Failures, cancellation, and obsolete results preserve the last accepted field. Changing observer resolution clears a field that no longer matches its dimensions. The active complex field is transient and does not persist with a saved level. Use **Save Complex Field** for explicit persistence, then select its asset under **Stored Complex Field** and click **Load Stored Complex Field** when needed. Saving an SLM phase pattern remains a separate existing operation. Reconstruction, preview changes, and saving the level do not automatically export observer data.
 
 Numerical work runs on a worker thread. Snapshot copying, result validation, grayscale generation, and preview texture upload still run on the game thread. Large grids can therefore affect frame time even though propagation itself is asynchronous.
+
+## Docker reconstruction
+
+Build and run the shared [V100 Docker backend](../Backend/V100/README.md) with the current source. In **Parameters**, select **Reconstruction Backend = Docker (TCP/CUDA)** and keep **Mode = Observer Plane**. Set **Docker > Address/Port** to the published endpoint (default `127.0.0.1:7000`) and click **Reconstruct**. The same service accepts PointFocus solver jobs and reconstruction jobs; request types select the compute mode automatically.
+
+The Docker settings provide numeric IPv4, port, connect timeout, and total request timeout (defaults 5 and 30 seconds). The total timeout includes serialization, transfer, computation, and conversion. Increase it for large direct-propagation jobs. Settings are captured with the job; changing them invalidates an in-flight result. Cancel, stale input rejection, latest-request handling, and observer publication follow the same actor lifecycle as CPU reconstruction.
+
+The service runs FP64 Rayleigh–Sommerfeld propagation on all visible GPUs, including PlaneWave and PointSource illumination and translated/tilted observers. Each GPU computes complete sums for its own contiguous portion of observer pixels, with ordered compensation across SLM batches. The initial launch configuration retains the PointFocus tuning: **65,536 pixels per tile, 128 threads per block, and 256 contributors per batch**. The existing PointFocus calculation and CPU reconstruction reference are unchanged. CUDA errors fail the job without CPU or dummy fallback.
+
+CGHV **1.2** carries full binary64 phase inputs and complex output pairs. Rebuild both server and Unreal after this protocol update; 1.1 peers are rejected. Each axis is at most 16,384 pixels; transport limits are 16,777,216 SLM pixels and 16,777,214 observer pixels, with at most 256 MiB per frame. Camera mode and the server's explicit dummy fixture do not reconstruct fields. Phase/Amplitude/Intensity previews and all saved data formats work identically for accepted CPU and Docker results.
 
 ## Coordinates and field representation
 
@@ -95,7 +105,9 @@ Amplitude is the field magnitude `sqrt(Real^2 + Imaginary^2)`. Intensity is its 
 
 ## Saving and loading observer data
 
-On the observer, open **CGH > Field > Save** and click **Save Complex Field** after reconstruction. Each click creates six uniquely named files:
+After the reconstructor reaches **Ready**, open **CGH > Reconstruction > Save** on **CGH Reconstructor Actor** and click **Save Complex Field**. This uses the linked observer's save directories and shows its result in **Field Save Status**. Like the solver's save action, it requires that actor's accepted result to remain the active observer field; pending/cancelled/failed jobs or a replaced destination/field are rejected.
+
+The observer also keeps its own **CGH > Field > Save > Save Complex Field** button for any valid current field, including loaded data. Both buttons use the same export operation. Each successful save creates six uniquely named files:
 
 | Output | Contents |
 | --- | --- |
@@ -129,6 +141,14 @@ intensity = amplitude**2
 ```
 
 ## Verification
+
+**2026-09-22 — reconstructor save button:** Editor and Game builds passed, as did all **10 focused persistence/lifecycle tests**. The new button writes all six observer formats, reports delegated success/failure, preserves field and job state, and rejects unpublished or replaced results. Report: `Saved/Automation/CGHReconstructorSave/index.json`.
+
+**2026-09-22 — Docker/CUDA reconstruction:** The CUDA 12.9.2 / Ubuntu 22.04 image and Linux Development Editor/Game targets built successfully. All **93 headless Unreal tests passed**, with zero warnings, skips, or failures, using the live Docker service on both V100s and the native executable for controlled transport fixtures. The five Docker reconstruction tests cover malformed/fragmented responses, invalid inputs/settings, timeout and cancellation, immutable settings snapshots, stale endpoint rejection, automatic recovery, CPU/CUDA complex parity, observer publication, and switching back to CPU.
+
+All **6/6 standalone CTest suites passed**: wire codec, TCP integration, PointFocus, observer reconstruction, multi-GPU PointFocus, and multi-GPU reconstruction. Independent complex-field fixtures cover oblique PlaneWave and PointSource illumination, tilted planes, absolute amplitude, zero light, invalid geometry, and source/tile boundaries. Single- and dual-GPU complex arrays were bit-identical in the tested cases, including **513 SLM contributors and a 513×257 observer** (131,841 samples). Concurrent jobs, cancellation isolation, disconnect recovery, and no-visible-GPU errors passed. A CUDA 12.9.2 device-link audit with the release/separable-compilation flags reported 60 registers per reconstruction thread, a 40-byte stack, and zero static local memory. The full 65,536-pixel tile launches 512 blocks of 128 threads. This is correctness and compiler-resource coverage, not a reconstruction performance benchmark.
+
+The tuned PointFocus CUDA file and both CPU numerical reference files are unchanged, as are all 19 existing Content files. The rebuilt `cgh-v100:latest` container is running on `127.0.0.1:7000`, exposing host GPUs 1 and 3. The separate test container was removed. Unreal's report is `Saved/Automation/CGHDockerReconstructionFinal/index.json`; standalone logs and builds are `/tmp/CGHDockerReconstructionCTestFinal.log` and `/tmp/cgh-docker-reconstruction-tests`. Restart the editor to load the new native backend and protocol. Camera/lens mode, cooking, and packaged deployment remain unverified/unimplemented as applicable.
 
 **2026-09-22 — intensity preview and export:** Editor and Game Linux Development builds passed. The headless suite passed **82 tests**, with six optional external Docker/CUDA tests skipped and zero failures. Intensity checks cover normalized squared magnitude, zero and extreme finite fields, Details mode changes on an open widget, exact G8 PNG pixels, six-file saves, and failure handling. The Vulkan/Slate render test passed for all three modes, including the intensity header, grayscale cells, and row order. Reports are under `Saved/Automation/CGHIntensity` and `Saved/Automation/CGHIntensityRender`; the intensity screenshot is `Saved/Automation/CGHObserverPreview/ObserverIntensityPreview.png`. All 19 existing Content files were unchanged.
 

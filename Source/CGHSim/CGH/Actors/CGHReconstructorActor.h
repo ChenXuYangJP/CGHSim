@@ -67,6 +67,16 @@ public:
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction")
 	void Reconstruct();
 
+	/** Saves this reconstructor's accepted result if it is still the active observer field. */
+	UFUNCTION(BlueprintCallable, Category = "CGH|Reconstruction|Save")
+	bool SaveReconstructedComplexField();
+
+	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction|Save")
+	void SaveComplexField();
+
+	UPROPERTY(VisibleInstanceOnly, BlueprintReadOnly, Transient, DuplicateTransient, NonTransactional, Category = "CGH|Reconstruction|Save")
+	FString FieldSaveStatus = TEXT("Reconstruct a complex field, then press Save Complex Field.");
+
 	UFUNCTION(BlueprintCallable, CallInEditor, Category = "CGH|Reconstruction")
 	void CancelReconstruction();
 
@@ -87,6 +97,8 @@ private:
 	TOptional<FCGHReconstructionSubmission> LastAttempt;
 	bool bAcceptActiveResult = false;
 	bool bPolling = false;
+	TWeakObjectPtr<ACGHObserverPlaneActor> LastPublishedObserver;
+	uint64 LastPublishedFieldRevision = 0;
 
 	bool CaptureSubmission(FCGHReconstructionSubmission& Out, FString& Error);
 	static bool SameInputs(const FCGHReconstructionSubmission& A, const FCGHReconstructionSubmission& B);

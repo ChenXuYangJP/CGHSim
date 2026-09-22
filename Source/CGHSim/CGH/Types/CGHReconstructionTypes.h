@@ -10,7 +10,7 @@ UENUM(BlueprintType)
 enum class ECGHReconstructionBackend : uint8
 {
 	CPU,
-	Docker UMETA(DisplayName = "Docker (Not Implemented)")
+	Docker UMETA(DisplayName = "Docker (TCP/CUDA)")
 };
 
 UENUM(BlueprintType)
@@ -40,6 +40,9 @@ struct CGHSIM_API FCGHReconstructionParameters
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reconstruction")
 	ECGHReconstructionMode Mode = ECGHReconstructionMode::ObserverPlane;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Reconstruction", meta = (EditCondition = "ReconstructionBackend == ECGHReconstructionBackend::Docker"))
+	FCGHDockerSolverSettings Docker;
 };
 
 /** Owned SI-unit optical snapshot. Worker threads never access actors or other UObjects. */

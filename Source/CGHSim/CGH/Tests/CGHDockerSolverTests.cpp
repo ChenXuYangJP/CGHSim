@@ -206,7 +206,7 @@ namespace
 	};
 
 
-	/** Independent CGHV 1.1 bytes expose decoder errors that a shared encoder could conceal. */
+	/** Independent CGHV 1.2 bytes expose decoder errors that a shared encoder could conceal. */
 	struct FCGHScriptedPeer
 	{
 		ISocketSubsystem* Subsystem = nullptr;
@@ -310,7 +310,7 @@ namespace
 					Reply.Init(0, 32 + 32 + 15 * 8);
 					Reply[0] = 'C'; Reply[1] = 'G'; Reply[2] = 'H'; Reply[3] = 'V';
 					Reply[5] = 1; // major 1
-					Reply[7] = 1; // minor 1
+					Reply[7] = 2; // minor 2
 					Reply[9] = 2; // Result
 					FMemory::Memcpy(Reply.GetData() + 16, RequestHeader + 16, 8);
 					Reply[31] = 32 + 15 * 8;
@@ -328,7 +328,7 @@ namespace
 					case 6: Reply.SetNum(72); break; // Truncated body, unchanged advertised length.
 					case 7: Reply[29] = 1; break; // Payload exceeds the requested output size.
 					case 8: Reply[48] = 0x7f; Reply[49] = 0xf0; break; // Infinite compute duration.
-					case 9: Reply[7] = 2; break; // Unsupported future protocol minor.
+					case 9: Reply[7] = 3; break; // Unsupported future protocol minor.
 					case 10: Reply[35] = 3; break; // Unsupported result status.
 					}
 					Transfer(*Client, Reply.GetData(), Reply.Num(), true, Deadline);

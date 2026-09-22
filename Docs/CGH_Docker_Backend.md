@@ -1,8 +1,8 @@
-# Docker/TCP backend — V100 PointFocus
+# Docker/TCP backend — V100 PointFocus and reconstruction
 
 `UCGHDockerSolverBackend` is the second implementation of `UCGHSolverBackend`. It serializes an owned solver snapshot, communicates asynchronously over TCP, and receives an `FCGHSolverResult`. `Backend/V100` contains an independent Linux C++ server, a CMake build, and a Dockerfile. The server and shared wire contract use no Unreal Engine headers or libraries.
 
-**The server runs the existing PointFocus algorithm across all visible CUDA GPUs by default.** The portable solver lives in `src/solver/CudaPointFocus.cu`; `main.cpp` retains TCP framing and dispatch. `--solver dummy` selects the original transport-test ramp. `UCGHCPUSolverBackend` and the numerical implementation in `CGHPointFocus` are unchanged. The CPU implementation remains the numerical reference.
+**The default server dispatches PointFocus and observer reconstruction across all visible CUDA GPUs.** `UCGHDockerReconstructionBackend` sends SLM phase/light/observer snapshots and receives complex samples for normal `PollReconstructor` publication. The reconstruction implementation is in `src/reconstruction/CudaReconstruction.cu` and follows the unchanged CPU Rayleigh–Sommerfeld reference. The portable solver lives in `src/solver/CudaPointFocus.cu`; `main.cpp` retains TCP framing and dispatch. `--solver dummy` selects the original transport-test ramp. `UCGHCPUSolverBackend` and the numerical implementation in `CGHPointFocus` are unchanged. The CPU implementation remains the numerical reference.
 
 ```mermaid
 sequenceDiagram
@@ -24,7 +24,7 @@ sequenceDiagram
 
 Use the standalone [server instructions](../Backend/V100/README.md) for CMake, CTest, Docker image build, and port publishing. The default service port is **7000**. Native server builds require a **CUDA toolkit with `nvcc`** (the Docker build pins **12.9.2**), a compatible C++17 host compiler, CMake, and pthreads; CTest additionally uses Python 3. Unreal Engine is not required to build the server. The UE module itself retains its existing build dependencies.
 
-`CGHV100Backend` project **1.1.0** enables CMake languages `CXX` and `CUDA`, targets architecture **70**, and includes `src/solver/CudaPointFocus.cu` with separable compilation. The solver ports the same FP64 point/mesh superposition, ordered compensated sums, single-emitter phase formula, zero-field threshold, pixel coordinates and illumination compensation as `CGHPointFocus.cpp`. It adds no new optical algorithm. The CPU backend and reference implementation remain unchanged; the explicit dummy mode is retained for transport tests.
+`CGHV100Backend` project **1.2.0** enables CMake languages `CXX` and `CUDA`, targets architecture **70**, and includes `src/solver/CudaPointFocus.cu` with separable compilation. The solver ports the same FP64 point/mesh superposition, ordered compensated sums, single-emitter phase formula, zero-field threshold, pixel coordinates and illumination compensation as `CGHPointFocus.cpp`. It adds no new optical algorithm. The CPU backend and reference implementation remain unchanged; the explicit dummy mode is retained for transport tests.
 
 The Docker build stage uses `nvidia/cuda:12.9.2-devel-ubuntu22.04`; its runtime stage uses `nvidia/cuda:12.9.2-runtime-ubuntu22.04`. Build and launch from the repository root:
 
@@ -48,11 +48,17 @@ In Unreal:
 
 The Docker phase-1 limit is 16,777,216 pixels, at most 16,384 per axis, and 1,000,000 aggregate point/mesh samples. These transport limits do not change CPU limits. Each frame is limited to 256 MiB. Large grids require corresponding input, wire, result, and preview buffers; begin with the default 256×256 SLM.
 
+## Reconstruction compute mode
+
+On **CGH Reconstructor Actor**, choose **Parameters > Reconstruction Backend > Docker (TCP/CUDA)** and **Mode > Observer Plane**. Configure its **Docker** endpoint and timeouts, then click **Reconstruct**. The same running container and port serve solver and reconstruction requests. Message type selects the calculation; `--solver cuda` enables both, while `--solver dummy` rejects reconstruction explicitly.
+
+Reconstruction returns one full-precision complex value per observer sample. Phase, Amplitude, and Intensity previews and saved files use the existing observer workflow. Endpoint edits, changed optical inputs, cancellation, and superseding requests reject obsolete results. See [reconstruction setup and model](CGH_Reconstruction.md#docker-reconstruction).
+
 ## GPU execution
 
 The CUDA solver divides each job's row-major pixel array into balanced, contiguous portions across all visible GPUs. Each device receives the full emitter list and computes the same complete ordered sum for its assigned pixels, using the existing FP64 PointFocus algorithm. Per-device buffers and streams keep execution independent; result portions are copied into their original positions in one phase array. There is no cross-device field reduction, and normalization, source order, compensation, phase conventions, and pixel coordinates remain those of the CPU reference.
 
-Cancellation or an error on any GPU stops the whole job. Workers drain their bounded in-flight operations and release device resources before completion; no partial result is published. This extends execution across devices without changing CGHV **1.1**, UE transport, the CPU backend, or the reference algorithm.
+Cancellation or an error on any GPU stops the whole job. Workers drain their bounded in-flight operations and release device resources before completion; no partial result is published. Both computations distribute complete output-pixel sums across devices. The PointFocus kernel and both CPU reference algorithms remain unchanged. Reconstruction uses the same 65,536-pixel tiles, 128-thread blocks, and bounded 256-contributor batches as the tuned PointFocus path.
 
 ## Ownership and lifecycle
 
@@ -66,15 +72,19 @@ The client checks version, type, request ID, lengths, dimensions, result status,
 
 ## Wire protocol and CUDA extension
 
-The wire protocol is now **CGHV 1.1**, independently of the CMake project version **1.1.0**. Version 1.1 adds the numerical `PointFocusSuccess` status; both UE and server must be rebuilt because old 1.0 peers reject it explicitly. See [the versioned wire specification](../Backend/V100/PROTOCOL.md) and the shared header in `Backend/V100/include/cgh/wire.hpp` for exact field order, units, type IDs, byte order, errors, and dummy pattern definition. Positions/pitches use meters, phase uses radians, and the propagation convention is explicit. Full binary64 values preserve optical precision; mesh clouds preserve identity, revision, target-local positions, normals, sample amplitude/phase, and UVs.
+The wire protocol is **CGHV 1.2**, independently of CMake project version **1.2.0**. Rebuild both Unreal and the server: both endpoints require this exact version and explicitly reject older peers. The existing PointFocus request/result payload layout is unchanged. New `ReconstructionRequest=5` and `ReconstructionResult=6` frame types separate observer optical inputs and complex outputs from solver phases. `ReconstructionSuccess=3` identifies actual reconstruction; the existing statuses remain `DummySuccess=1` and `PointFocusSuccess=2`.
 
-Phase storage remains `PhaseRad[row * ResolutionX + column]`, with columns along SLM-local +Y and rows along -Z. The result has no authority to set the SLM's local revision; `SetPhasePattern` owns that revision.
+See the [wire specification](../Backend/V100/PROTOCOL.md) and portable header for exact field order, units, enums, limits, and version rules. All arrays use binary64 values, explicit counts, and row-major order. Result dimensions, status, convention, compute time, byte counts, and every numerical sample are validated before publication. Incoming results do not set local SLM/observer revisions.
 
-CUDA results use `PointFocusSuccess=2`, while the transport fixture uses `DummySuccess=1`. The numerical port preserves the CPU algorithm and emitter order, including Neumaier corrections across bounded GPU batches. CUDA and CPU math libraries may differ by rounding; parity is measured with circular phase error. Unknown versions, flags, and enums remain rejected. Future algorithms need explicit protocol support.
+CUDA and CPU math libraries can differ by floating-point rounding. PointFocus comparisons use circular phase error; reconstruction comparisons use complex absolute/relative error. GPU count does not change summation order for any output pixel.
 
 ## Verification
 
 Standalone protocol/server tests are registered with CTest. Unreal automation adds `CGH.DockerBackend` tests for transport failure, actor publication, CPU/Docker switching, cancellation, stale results, timeout, and recovery. Real-server tests require `-CGHDockerTestServer=/absolute/path/to/server`; without the option they log an explicit skip warning. The legacy dummy roundtrip test also accepts `-CGHDockerTestPort=<dummy-service-port>` to exercise a service explicitly started with `--solver dummy`. Numerical CUDA tests use `-CGHCudaTestPort=<cuda-service-port>` and compare returned phases directly with `CGHPointFocus::Solve`, then check actor-to-SLM publication. Ports refer to `127.0.0.1`.
+
+### Observer reconstruction verification — 2026-09-22
+
+The rebuilt CUDA 12.9.2 image supports both compute modes through the shared CGHV 1.2 endpoint. Editor and Game builds passed. **93/93 Unreal tests passed without warnings or skips**, and **6/6 CTest suites passed** on the two V100s. Coverage includes existing PointFocus regressions, independent reconstruction numerics, strict complex-result decoding, observer publication, cancellation/timeout/stale settings, and single/dual-GPU parity across 65,536-output and 256-source boundaries. The PointFocus kernel and CPU references are unchanged. See the [reconstruction verification record](CGH_Reconstruction.md#verification) for artifacts and scope.
 
 ### Recorded verification — 2026-09-21
 

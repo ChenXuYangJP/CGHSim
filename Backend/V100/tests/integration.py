@@ -12,7 +12,7 @@ import time
 HEADER = struct.Struct("!4sHHHHIQQ")
 
 
-def frame(kind, request_id, payload=b"", major=1, minor=1, flags=0, reserved=0):
+def frame(kind, request_id, payload=b"", major=1, minor=2, flags=0, reserved=0):
     return HEADER.pack(b"CGHV", major, minor, kind, flags, reserved, request_id, len(payload)) + payload
 
 
@@ -28,6 +28,16 @@ def request(width=7, height=5, mesh=True):
     return data
 
 
+def reconstruction_request():
+    """Independent encoder: 224-byte CGHV 1.2 prefix, then raw SLM radians."""
+    data = struct.pack("!IIII4dI", 2, 1, 2, 2, 8e-6, 9e-6, 16e-6, 18e-6, 1)
+    data += struct.pack("!6dI4d", 532e-9, 1, .2, 1, 0, 0, 1, 0, 0, 0, .3)
+    data += struct.pack("!II9dQ", 3, 2, 3e-6, 5e-6, .2, -.01, .03, 0, 0, .6, .8, 4)
+    assert len(data) == 224
+    data += struct.pack("!4d", 1.0, -0.0, -7.5, 1.25e100)
+    return data
+
+
 def exact(sock, size):
     data = bytearray()
     while len(data) < size:
@@ -40,7 +50,7 @@ def exact(sock, size):
 
 def receive(sock):
     magic, major, minor, kind, flags, reserved, identity, length = HEADER.unpack(exact(sock, HEADER.size))
-    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 1, 0, 0)
+    assert (magic, major, minor, flags, reserved) == (b"CGHV", 1, 2, 0, 0)
     assert length <= 256 * 1024 * 1024
     return kind, identity, exact(sock, length)
 
@@ -97,6 +107,7 @@ def check_error(server, message):
         assert kind == 4 and identity == 99
         size, = struct.unpack("!I", payload[:4])
         assert 0 < size <= 4096 and len(payload) == size + 4
+        return payload[4:].decode("utf-8")
 
 
 def main(executable):
@@ -105,10 +116,24 @@ def main(executable):
         solve(server, 1, fragment=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda identity: solve(server, identity), range(2, 18)))
-        for changes in ({"major": 2}, {"minor": 0}, {"minor": 2}, {"flags": 1}, {"reserved": 1}):
+        for changes in ({"major": 2}, {"minor": 0}, {"minor": 1}, {"minor": 3}, {"flags": 1}, {"reserved": 1}):
             check_error(server, frame(1, 99, request(), **changes))
         check_error(server, frame(8, 99))
         check_error(server, frame(2, 99))
+        check_error(server, frame(6, 99))  # A reconstruction result cannot start a job.
+        assert "dummy" in check_error(server, frame(5, 99, reconstruction_request())).lower()
+        check_error(server, frame(5, 99))
+        check_error(server, frame(5, 99, reconstruction_request() + b"x"))
+        bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!I", bad_reconstruction, 0, 1)
+        assert "algorithm" in check_error(server, frame(5, 99, bad_reconstruction)).lower()
+        bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!Q", bad_reconstruction, 216, 2**64 - 1)
+        assert "phase" in check_error(server, frame(5, 99, bad_reconstruction)).lower()
+        bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!d", bad_reconstruction, 224, float("nan"))
+        assert "phase" in check_error(server, frame(5, 99, bad_reconstruction)).lower()
+        bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!d", bad_reconstruction, 184, float("inf"))
+        assert "observer" in check_error(server, frame(5, 99, bad_reconstruction)).lower()
+        bad_reconstruction = bytearray(reconstruction_request()); struct.pack_into("!II", bad_reconstruction, 136, 4096, 4096)
+        check_error(server, frame(5, 99, bad_reconstruction))
         check_error(server, frame(1, 99, request() + b"x"))
         bad = bytearray(request()); struct.pack_into("!I", bad, 4, 77)
         check_error(server, frame(1, 99, bad))
@@ -118,11 +143,14 @@ def main(executable):
         check_error(server, frame(1, 99, bad))
         bad = bytearray(request()); struct.pack_into("!Q", bad, 344, 10)
         check_error(server, frame(1, 99, bad))
-        check_error(server, HEADER.pack(b"CGHV", 1, 1, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
+        check_error(server, HEADER.pack(b"CGHV", 1, 2, 1, 0, 0, 99, 256 * 1024 * 1024 + 1))
         check_error(server, frame(1, 99, request(16385, 1)))
         with server.connect() as sock:
             sock.sendall(frame(1, 100, request())[:40])
             assert sock.recv(1) == b""  # Slow/truncated payload expires.
+        with server.connect() as sock:
+            sock.sendall(frame(5, 100, reconstruction_request())[:40])
+            assert sock.recv(1) == b""  # Reconstruction uses the same body deadline.
         with server.connect() as sock:
             sock.sendall(b"CGH")  # Incomplete header then disconnect.
         solve(server, 101)

@@ -58,7 +58,7 @@ class Scene:
 
 
 def encode(scene):
-    """Encode the published CGHV 1.1 layout without using the C++ codec."""
+    """Encode the published CGHV 1.2 layout without using the C++ codec."""
     payload = struct.pack("!IIIII4dI", 2, 1, 1, scene.width, scene.height,
                           scene.pitch_x, scene.pitch_y, scene.width * scene.pitch_x,
                           scene.height * scene.pitch_y, scene.modulation)

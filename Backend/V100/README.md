@@ -1,10 +1,13 @@
-# V100 PointFocus backend
+# V100 solver and reconstruction backend
 
-A standalone Linux C++17/CUDA TCP server with no Unreal Engine headers or libraries. The default solver ports the existing [`CGHPointFocus.cpp`](../../Source/CGHSim/CGH/Solver/CGHPointFocus.cpp) algorithm to CUDA using FP64. The original CPU implementation remains the numerical reference. `--solver dummy` retains the deterministic transport fixture.
+A standalone Linux C++17/CUDA TCP server with no Unreal Engine headers or libraries. The default solver ports the existing [`CGHPointFocus.cpp`](../../Source/CGHSim/CGH/Solver/CGHPointFocus.cpp) algorithm to CUDA using FP64. The service also reconstructs an observer-plane complex field using the FP64 Rayleigh–Sommerfeld calculation in [`CGHReconstruction.cpp`](../../Source/CGHSim/CGH/Reconstruction/CGHReconstruction.cpp). Both CPU implementations remain the numerical references. `--solver dummy` retains the deterministic transport fixture.
 
 ```text
 src/
 ├── main.cpp                  # TCP, framing, decoding, cancellation, encoding
+├── reconstruction/
+│   ├── CudaReconstruction.hpp # Portable observer reconstruction boundary
+│   └── CudaReconstruction.cu  # Rayleigh–Sommerfeld field across visible GPUs
 └── solver/
     ├── PointFocusSolver.hpp   # Portable solver boundary and dummy declaration
     ├── DummyPointFocus.cpp    # Original transport-test phase ramp
@@ -15,7 +18,7 @@ TCP -> DecodeRequest -> wire::Request -> CudaPointFocus::Solve
     -> wire::Result -> EncodeResult -> TCP
 ```
 
-The portable [`include/cgh/wire.hpp`](include/cgh/wire.hpp) is shared with UE. The CMake project is `CGHV100Backend` **1.1.0**; the independently versioned wire protocol is **CGHV 1.1**. This protocol adds `PointFocusSuccess` alongside `DummySuccess`; version 1.0 peers reject the new protocol explicitly and must be rebuilt.
+The portable [`include/cgh/wire.hpp`](include/cgh/wire.hpp) is shared with UE. The CMake project is `CGHV100Backend` **1.2.0**; the independently versioned wire protocol is **CGHV 1.2**. Version 1.2 adds explicit reconstruction request/result messages and `ReconstructionSuccess`, carrying complex samples separately from PointFocus phases. Both Unreal and server must be rebuilt; older protocol versions are rejected explicitly.
 
 ## Docker on the task's two V100s
 
@@ -37,7 +40,9 @@ The host needs a compatible NVIDIA driver and NVIDIA Container Toolkit configure
 
 Select the UE actor's **Docker (TCP/CUDA)** backend and use `127.0.0.1:7000`. The normal `FCGHSolverJob -> PollSolver -> SLM` path applies the received result. CPU remains UE's default backend. CUDA failures are reported to UE; the server does not fall back to a CPU calculation or dummy pattern.
 
-For the original transport fixture, append `--solver dummy` to the Docker command. Its phase remains `2*pi * ((column + 3*row) mod 256) / 256`. UE marks such a publication explicitly as dummy.
+For reconstruction, select **Reconstruction Backend = Docker (TCP/CUDA)** and **Mode = Observer Plane** on the reconstructor. Its **Docker** settings use the same endpoint, `127.0.0.1:7000`. Click **Reconstruct**, then select the observer for Phase, Amplitude, or Intensity. Both compute modes are available concurrently on the default CUDA service; no server restart or command-line mode switch is needed between them. Reconstruction accepts PlaneWave and PointSource illumination and returns the full complex field. Camera/lens reconstruction remains unimplemented.
+
+For the original transport fixture, append `--solver dummy` to the Docker command. Its phase remains `2*pi * ((column + 3*row) mod 256) / 256`. UE marks such a publication explicitly as dummy. This fixture mode rejects reconstruction requests; it never fabricates a reconstructed field.
 
 ## Native build and tests
 
@@ -51,7 +56,7 @@ CUDA_VISIBLE_DEVICES=1,3 ctest --test-dir Backend/V100/build --output-on-failure
 CUDA_VISIBLE_DEVICES=1,3 Backend/V100/build/cgh_v100_server --port 7000
 ```
 
-If needed, pass `-DCMAKE_CUDA_COMPILER=/path/to/cuda-12.9/bin/nvcc`. `CGH_ENABLE_MULTI_GPU_TESTS` defaults to OFF; enabling it requires at least two visible GPUs and adds both the existing CUDA fixtures and the `cuda_multi_gpu` CTest suite. That suite compares single-GPU and dual-GPU results, checks cancellation while concurrent jobs run, and verifies the no-visible-GPU error. For tests on one GPU, enable `CGH_ENABLE_CUDA_TESTS=ON` instead. Both options default to OFF so the codec and explicit dummy transport tests can run without a visible GPU; building the executable still requires the CUDA compiler. `-DBUILD_TESTING=OFF` builds only the server.
+If needed, pass `-DCMAKE_CUDA_COMPILER=/path/to/cuda-12.9/bin/nvcc`. `CGH_ENABLE_MULTI_GPU_TESTS` defaults to OFF; enabling it requires at least two visible GPUs and adds both the existing CUDA fixtures and the `cuda_multi_gpu` CTest suite. That suite compares single-GPU and dual-GPU results, checks cancellation while concurrent jobs run, and verifies the no-visible-GPU error. Reconstruction has separate numerical and multi-GPU suites enabled by the same options. For tests on one GPU, enable `CGH_ENABLE_CUDA_TESTS=ON` instead. Both options default to OFF so the codec and explicit dummy transport tests can run without a visible GPU; building the executable still requires the CUDA compiler. `-DBUILD_TESTING=OFF` builds only the server.
 
 The tests cover the wire format, fragmented and malformed TCP, concurrent jobs, cancellation/disconnect/timeout, numerical point and mesh fixtures, plane-wave compensation, and invalid optical inputs. The UE CUDA tests compare received values directly against the unchanged `CGHPointFocus::Solve`; see [verification and UE test commands](../../Docs/CGH_Docker_Backend.md).
 
@@ -74,7 +79,15 @@ Cancellation or a failure on any device aborts the whole job. All workers finish
 - PlaneWave illumination and a phase-only SLM are required. The propagation convention, finite bounds, unit light direction, mesh quaternion, resource revisions, contributing points off the SLM plane, and positive contribution are validated before publication.
 - GPU pixel/emitter batches retain the sum and compensation across launches. Cancellation is checked between bounded operations; the in-flight operation is drained before device buffers are released. A cancelled or failed job returns no partial result.
 
-This is the same numerical algorithm distributed by pixel across devices. GPU and CPU math libraries can differ by floating-point rounding; comparisons use circular phase error rather than bitwise equality. GS, FFT propagation, reconstruction imaging, and new optical models are outside this change.
+This is the same numerical algorithm distributed by pixel across devices. GPU and CPU math libraries can differ by floating-point rounding; comparisons use circular phase error rather than bitwise equality. GS and FFT propagation are outside these direct-summation implementations.
+
+## Observer reconstruction
+
+The reconstruction request carries SLM sampling, the active phase array, illumination, and the observer's sampling grid and rigid pose in SLM-local meters. Each observer output is the complete ordered sum over SLM pixels. The result contains one `(real, imaginary)` binary64 pair per observer pixel, without normalization. Preview and saved PNG mappings remain in Unreal.
+
+The CUDA implementation follows the [CPU reconstruction model](../../Docs/CGH_Reconstruction.md#cpu-propagation-model), including point-source attenuation, tilted planes, and the `exp(+i*k*r)` convention. It partitions **observer output pixels** across visible devices and replicates incident SLM samples. Ordered compensated real/imaginary sums persist across contributor batches; GPUs do not reduce partial fields into one another. Cancellation drains in-flight work and publishes no partial field.
+
+Reconstruction starts from the measured PointFocus launch configuration: **65,536 output pixels per tile, 128 threads per block, and 256 source pixels per accumulation batch**. A full tile launches 512 blocks, exceeding the V100's 80 SMs. The existing PointFocus kernel and its measured tuning are preserved. These are launch settings for direct propagation, not an optical truncation of the aperture; every SLM pixel contributes. This does not claim that the PointFocus measurements establish an optimal tile size for reconstruction.
 
 ## Lifecycle and limits
 
@@ -83,13 +96,13 @@ cgh_v100_server --port 0 --solver cuda --delay-ms 0 --io-timeout-ms 30000 --max-
 ```
 
 - `--port`: default 7000; zero chooses an available port. Readiness prints `LISTENING <port>`.
-- `--solver`: `cuda` (default) or `dummy`.
+- `--solver`: `cuda` (default, dispatches PointFocus and observer reconstruction) or `dummy` (PointFocus transport fixture only).
 - `--delay-ms`: cancellable artificial delay for tests, 0–300000.
 - `--io-timeout-ms`: receive and send budgets, separately; default 30000, range 1–300000. Partial transfers cannot extend them.
 - `--max-clients`: default 8, range 1–128; excess connections close immediately.
 
 Each connection carries one job. Cancel uses its request ID; disconnect is authoritative cancellation, including during partial reception. SIGINT/SIGTERM stop the listener and cancel workers. The client discards results for cancelled or superseded requests.
 
-Limits remain 256 MiB per payload, 16384 per SLM axis, 16,777,216 total pixels, and 1,000,000 aggregate point/mesh samples. The unchanged CPU implementation retains its own limits. Memory and time scale with the requested grid and emitter count; start with the default 256×256 grid and coarse mesh sampling.
+Limits remain 256 MiB per payload, 16384 per SLM axis, 16,777,216 total pixels, and 1,000,000 aggregate point/mesh samples. Reconstruction permits up to 16,777,216 SLM pixels and 16,777,214 observer pixels (the 32-byte result prefix plus 16 bytes per complex sample must fit the same payload cap). Each axis remains bounded by 16384. The unchanged CPU implementations retain their own limits. Memory and time scale with the requested grid and emitter count; start with the default 256×256 grid and coarse mesh sampling.
 
 The server listens on all IPv4 interfaces inside its container; the shown command publishes only host loopback. CGHV does not supply authentication or encryption. See [PROTOCOL.md](PROTOCOL.md) for field order, units, enums, and version rules.

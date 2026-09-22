@@ -3,11 +3,17 @@
 #if WITH_DEV_AUTOMATION_TESTS && WITH_EDITOR
 
 #include "CGH/Actors/CGHObserverPlaneActor.h"
+#include "CGH/Actors/CGHReconstructorActor.h"
+#include "CGH/Actors/CGHReconstructionLightActor.h"
+#include "CGH/Actors/CGHSLMActor.h"
+#include "CGH/Actors/CGHWorkbenchActor.h"
 #include "CGH/Types/CGHComplexFieldAsset.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Dom/JsonObject.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "HAL/PlatformTime.h"
 #include "ImageCore.h"
 #include "ImageUtils.h"
 #include "Misc/AutomationTest.h"
@@ -276,6 +282,113 @@ bool FCGHObserverSaveActorTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("Grid mismatch is explained"), Observer->ComplexFieldError.IsEmpty());
 	TestEqual(TEXT("Load does not change requested dimensions"), Observer->Parameters.ResolutionX, 4);
 	TestTrue(TEXT("Rejected grid load does not overwrite retained samples"), Before == FieldSaveExpectedBytes(Observer->GetComplexField()));
+	Scene.ForwardErrorMessages(this);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCGHReconstructorComplexFieldSaveTest,
+	"CGH.ComplexFieldSave.ReconstructorButtonAndPublicationGuards", EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCGHReconstructorComplexFieldSaveTest::RunTest(const FString& Parameters)
+{
+	FComplexFieldSaveFiles Files;
+	FTestWorldWrapper Scene;
+	if (!Scene.CreateTestWorld(EWorldType::Editor)) { Scene.ForwardErrorMessages(this); return false; }
+	UWorld* World = Scene.GetTestWorld();
+	ACGHSLMActor* SLM = World->SpawnActor<ACGHSLMActor>();
+	ACGHReconstructionLightActor* Light = World->SpawnActor<ACGHReconstructionLightActor>();
+	ACGHObserverPlaneActor* Observer = World->SpawnActor<ACGHObserverPlaneActor>();
+	ACGHWorkbenchActor* Workbench = World->SpawnActor<ACGHWorkbenchActor>();
+	ACGHReconstructorActor* Reconstructor = World->SpawnActor<ACGHReconstructorActor>();
+	if (!SLM || !Light || !Observer || !Workbench || !Reconstructor) { AddError(TEXT("Could not create reconstructor save fixture.")); return false; }
+	SLM->Parameters.ResolutionX = 2;
+	SLM->Parameters.ResolutionY = 2;
+	SLM->GeneratePreviewPhaseRamp();
+	Observer->Parameters.ResolutionX = 3;
+	Observer->Parameters.ResolutionY = 2;
+	Observer->SetActorLocation(FVector(40.0, 0.0, 0.0));
+	Observer->FieldAssetSaveFolder.Path = Files.AssetFolder;
+	Observer->FieldRawSaveDirectory.Path = Files.RawFolder;
+	Workbench->SLM = SLM;
+	Workbench->ReconstructionLight = Light;
+	Workbench->ObserverPlane = Observer;
+	Workbench->Reconstructor = Reconstructor;
+	Reconstructor->Workbench = Workbench;
+	const auto WaitReady = [&]()
+	{
+		const double Deadline = FPlatformTime::Seconds() + 5.0;
+		do
+		{
+			Reconstructor->PollReconstructor();
+			if (Reconstructor->JobState != ECGHReconstructionJobState::Queued && Reconstructor->JobState != ECGHReconstructionJobState::Running)
+			{
+				return TestTrue(*Reconstructor->StatusMessage, Reconstructor->JobState == ECGHReconstructionJobState::Ready);
+			}
+			FPlatformProcess::Sleep(0.001f);
+		} while (FPlatformTime::Seconds() < Deadline);
+		Reconstructor->CancelReconstruction();
+		AddError(TEXT("Timed out waiting for reconstructor save fixture."));
+		return false;
+	};
+	TestFalse(TEXT("An idle reconstructor cannot save"), Reconstructor->SaveReconstructedComplexField());
+	Observer->SetComplexField(MakeFieldSaveFixture());
+	TestFalse(TEXT("Unrelated observer data is not this reconstructor's publication"), Reconstructor->SaveReconstructedComplexField());
+	if (!TestTrue(TEXT("Tiny CPU reconstruction starts"), Reconstructor->StartReconstruction())) return false;
+	TestFalse(TEXT("An unpublished active job cannot save"), Reconstructor->SaveReconstructedComplexField());
+	if (!WaitReady()) return false;
+	TestEqual(TEXT("Reconstruction does not automatically save"), Files.FileCount(), 0);
+	const FCGHComplexField Before = Observer->GetComplexField();
+	const FCGHComplexSample* BeforeStorage = Observer->GetComplexField().Samples.GetData();
+	const int64 BeforeJobId = Reconstructor->JobId;
+	const double BeforeCompute = Reconstructor->LastComputeSeconds;
+	const FString BeforeStatus = Reconstructor->StatusMessage;
+	Reconstructor->SaveComplexField();
+	if (!Observer->LastSavedFieldAsset.IsNull()) Files.AssetPaths.Add(Observer->LastSavedFieldAsset.ToSoftObjectPath().ToString());
+	if (!TestEqual(TEXT("Reconstructor editor button writes the asset, binary, metadata, and three PNGs"), Files.FileCount(), 6))
+	{
+		AddError(Reconstructor->FieldSaveStatus); return false;
+	}
+	TestEqual(TEXT("Reconstructor reports the observer's save result"), Reconstructor->FieldSaveStatus, Observer->FieldSaveStatus);
+	TestTrue(TEXT("Save status identifies the exported binary"), Reconstructor->FieldSaveStatus.Contains(Observer->LastSavedFieldBinaryFile));
+	TestTrue(TEXT("Save preserves Ready state"), Reconstructor->JobState == ECGHReconstructionJobState::Ready);
+	TestEqual(TEXT("Save preserves job identity"), Reconstructor->JobId, BeforeJobId);
+	TestEqual(TEXT("Save preserves calculation duration"), Reconstructor->LastComputeSeconds, BeforeCompute);
+	TestEqual(TEXT("Save preserves calculation status"), Reconstructor->StatusMessage, BeforeStatus);
+	TestEqual(TEXT("Save preserves observer revision"), Observer->GetComplexFieldRevision(), Before.Revision);
+	TestTrue(TEXT("Save preserves every complex sample bit"), FieldSaveExpectedBytes(Observer->GetComplexField()) == FieldSaveExpectedBytes(Before));
+	TestTrue(TEXT("Save preserves the active sample allocation"), Observer->GetComplexField().Samples.GetData() == BeforeStorage);
+	TestTrue(TEXT("Save does not change the stored-field selection"), Observer->StoredComplexField.IsNull());
+	Observer->FieldRawSaveDirectory.Path.Reset();
+	TestFalse(TEXT("Observer export failures propagate through the reconstructor"), Reconstructor->SaveReconstructedComplexField());
+	TestEqual(TEXT("Delegated failure status remains actionable"), Reconstructor->FieldSaveStatus, Observer->FieldSaveStatus);
+	Observer->FieldRawSaveDirectory.Path = Files.RawFolder;
+	Workbench->ObserverPlane = nullptr;
+	TestFalse(TEXT("A missing observer reference blocks saving"), Reconstructor->SaveReconstructedComplexField());
+	ACGHObserverPlaneActor* OtherObserver = World->SpawnActor<ACGHObserverPlaneActor>();
+	if (!TestNotNull(TEXT("Replacement observer spawns"), OtherObserver)) return false;
+	OtherObserver->Parameters = Observer->Parameters;
+	OtherObserver->SetComplexField(Before);
+	Workbench->ObserverPlane = OtherObserver;
+	TestFalse(TEXT("A different observer with identical samples is not the published destination"), Reconstructor->SaveReconstructedComplexField());
+	Workbench->ObserverPlane = Observer;
+	Reconstructor->Workbench = nullptr;
+	TestFalse(TEXT("A missing workbench blocks saving"), Reconstructor->SaveReconstructedComplexField());
+	Reconstructor->Workbench = Workbench;
+	FCGHComplexField Replacement = Before;
+	Replacement.Samples[0].Real += 1.0;
+	Observer->SetComplexField(Replacement);
+	TestFalse(TEXT("Externally replaced samples invalidate publication ownership"), Reconstructor->SaveReconstructedComplexField());
+	Observer->ClearComplexField();
+	TestFalse(TEXT("A cleared field cannot be saved through the reconstructor"), Reconstructor->SaveReconstructedComplexField());
+	if (!Reconstructor->StartReconstruction() || !WaitReady()) return false;
+	if (!Reconstructor->StartReconstruction()) return false;
+	Reconstructor->CancelReconstruction();
+	TestFalse(TEXT("A cancelled job cannot save retained previous output"), Reconstructor->SaveReconstructedComplexField());
+	if (!Reconstructor->StartReconstruction() || !WaitReady()) return false;
+	Reconstructor->Parameters.Mode = ECGHReconstructionMode::Camera;
+	TestFalse(TEXT("Unsupported camera request fails"), Reconstructor->StartReconstruction());
+	TestFalse(TEXT("A failed job cannot save retained previous output"), Reconstructor->SaveReconstructedComplexField());
+	TestEqual(TEXT("Rejected saves leave the original six output files intact"), Files.FileCount(), 6);
 	Scene.ForwardErrorMessages(this);
 	return true;
 }

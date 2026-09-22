@@ -62,6 +62,18 @@ bool ACGHReconstructorActor::SameInputs(const FCGHReconstructionSubmission& A, c
 	{
 		return false;
 	}
+	const auto SameScalar = [](double X, double Y)
+	{
+		return X == Y || (FMath::IsNaN(X) && FMath::IsNaN(Y));
+	};
+	if (A.Parameters.ReconstructionBackend == ECGHReconstructionBackend::Docker
+		&& (A.Parameters.Docker.Address != B.Parameters.Docker.Address
+			|| A.Parameters.Docker.Port != B.Parameters.Docker.Port
+			|| !SameScalar(A.Parameters.Docker.ConnectTimeoutSeconds, B.Parameters.Docker.ConnectTimeoutSeconds)
+			|| !SameScalar(A.Parameters.Docker.RequestTimeoutSeconds, B.Parameters.Docker.RequestTimeoutSeconds)))
+	{
+		return false;
+	}
 	const FCGHSLMDescription& SX = A.Input.SLM;
 	const FCGHSLMDescription& SY = B.Input.SLM;
 	const FCGHReconstructionLightDescription& LX = A.Input.Light;
@@ -139,6 +151,34 @@ void ACGHReconstructorActor::Reconstruct()
 	StartReconstruction();
 }
 
+bool ACGHReconstructorActor::SaveReconstructedComplexField()
+{
+	check(IsInGameThread());
+	if (IsTemplate() || IsActorBeingDestroyed() || JobState != ECGHReconstructionJobState::Ready
+		|| ActiveJob || PendingSubmission.IsSet())
+	{
+		FieldSaveStatus = TEXT("Wait for a reconstructed complex field to reach Ready before saving.");
+		return false;
+	}
+	ACGHObserverPlaneActor* Observer = LastPublishedObserver.Get();
+	if (!IsValid(Workbench) || Workbench->IsActorBeingDestroyed() || Workbench->GetWorld() != GetWorld()
+		|| !IsValid(Observer) || Observer->IsActorBeingDestroyed() || Observer->GetWorld() != GetWorld()
+		|| Workbench->ObserverPlane != Observer || !Observer->HasValidComplexField()
+		|| Observer->GetComplexFieldRevision() != LastPublishedFieldRevision)
+	{
+		FieldSaveStatus = TEXT("The reconstructed result is no longer the active observer field. Reconstruct again, or save the current field from the observer plane.");
+		return false;
+	}
+	const bool bSaved = Observer->SaveCurrentComplexField();
+	FieldSaveStatus = Observer->FieldSaveStatus;
+	return bSaved;
+}
+
+void ACGHReconstructorActor::SaveComplexField()
+{
+	SaveReconstructedComplexField();
+}
+
 void ACGHReconstructorActor::SubmitPending()
 {
 	check(!ActiveJob && PendingSubmission.IsSet());
@@ -156,6 +196,7 @@ void ACGHReconstructorActor::SubmitPending()
 		{
 			Backend = NewObject<UCGHDockerReconstructionBackend>(this);
 		}
+		CastChecked<UCGHDockerReconstructionBackend>(Backend)->Settings = PendingSubmission->Parameters.Docker;
 	}
 	else if (!Cast<UCGHCPUReconstructionBackend>(Backend))
 	{
@@ -192,7 +233,7 @@ void ACGHReconstructorActor::PollReconstructor()
 			if (!CaptureSubmission(Current, Error) || !ActiveSubmission.IsSet()
 				|| !SameInputs(Current, ActiveSubmission.GetValue()) || Current.FieldRevision != ActiveSubmission->FieldRevision)
 			{
-				FailRequest(Error.IsEmpty() ? TEXT("Result discarded: optical inputs, SLM phase, or observer field changed during reconstruction.") : Error);
+				FailRequest(Error.IsEmpty() ? TEXT("Result discarded: optical inputs, Docker settings, SLM phase, or observer field changed during reconstruction.") : Error);
 			}
 			else if (ActiveJob->Result.PropagationConvention != ActiveSubmission->Input.PropagationConvention)
 			{
@@ -205,8 +246,10 @@ void ACGHReconstructorActor::PollReconstructor()
 			else if (Current.ObserverPlane->SetComplexField(MoveTemp(ActiveJob->Result.Field)))
 			{
 				LastComputeSeconds = ActiveJob->Result.ComputeSeconds;
+				LastPublishedObserver = Current.ObserverPlane;
+				LastPublishedFieldRevision = Current.ObserverPlane->GetComplexFieldRevision();
 				JobState = ECGHReconstructionJobState::Ready;
-				StatusMessage = TEXT("Complex optical field published to the observer plane. Select the plane to preview amplitude or phase.");
+				StatusMessage = TEXT("Complex optical field published to the observer plane. Select the plane to preview phase, amplitude, or intensity.");
 			}
 			else
 			{
@@ -227,7 +270,7 @@ void ACGHReconstructorActor::PollReconstructor()
 		JobState = ECGHReconstructionJobState::Running;
 		StatusMessage = ActiveSubmission->Parameters.ReconstructionBackend == ECGHReconstructionBackend::CPU
 			? TEXT("Reconstructing the complex optical field on the CPU worker.")
-			: TEXT("Checking Docker reconstruction backend availability.");
+			: TEXT("Reconstructing the complex optical field through the Docker TCP service.");
 	}
 	if (bAutoReconstruct)
 	{
@@ -269,6 +312,8 @@ void ACGHReconstructorActor::StopJobs()
 	ActiveSubmission.Reset();
 	PendingSubmission.Reset();
 	LastAttempt.Reset();
+	LastPublishedObserver.Reset();
+	LastPublishedFieldRevision = 0;
 	bAcceptActiveResult = false;
 	JobState = ECGHReconstructionJobState::Idle;
 	StatusMessage = TEXT("Reconstructor stopped; the last published observer field is retained.");

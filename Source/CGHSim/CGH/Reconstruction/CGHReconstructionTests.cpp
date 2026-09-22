@@ -355,11 +355,16 @@ bool FCGHReconstructionBackendTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("No partial field escapes cancellation"), CancelJob->Result.Field.Samples.IsEmpty());
 	TestTrue(TEXT("Worker identifies cancellation"), CancelJob->Result.Error.Contains(TEXT("cancelled")));
 	UCGHDockerReconstructionBackend* Docker = NewObject<UCGHDockerReconstructionBackend>();
-	const TSharedPtr<FCGHReconstructionJob, ESPMode::ThreadSafe> Unsupported = Docker->Submit(MakeInput());
-	TestTrue(TEXT("Docker stub completes immediately without network activity"), Unsupported->bFinished.load(std::memory_order_acquire));
-	TestFalse(TEXT("Docker never fabricates success"), Unsupported->Result.bSucceeded);
-	TestTrue(TEXT("Docker explains unsupported selection"), Unsupported->Result.Error.Contains(TEXT("not implemented")));
-	TestTrue(TEXT("Docker returns no fake samples"), Unsupported->Result.Field.Samples.IsEmpty());
+	Docker->Settings.Port = 0; // An invalid endpoint fails asynchronously without a remote service.
+	const TSharedPtr<FCGHReconstructionJob, ESPMode::ThreadSafe> Rejected = Docker->Submit(MakeInput());
+	if (!WaitForJob(*this, Rejected))
+	{
+		return false;
+	}
+	TestTrue(TEXT("Docker worker marks started before completing its mailbox"), Rejected->bStarted.load(std::memory_order_acquire));
+	TestFalse(TEXT("Invalid Docker endpoint never fabricates success"), Rejected->Result.bSucceeded);
+	TestTrue(TEXT("Docker identifies invalid endpoint settings"), Rejected->Result.Error.Contains(TEXT("port")));
+	TestTrue(TEXT("Failed Docker job returns no fake samples"), Rejected->Result.Field.Samples.IsEmpty());
 	return true;
 }
 
