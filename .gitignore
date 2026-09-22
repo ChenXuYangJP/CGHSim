@@ -8,6 +8,9 @@
 # Generated SLM phase-pattern assets (raw exports are covered by /Saved/)
 /Content/CGHSim/PhasePatterns/Generated/
 
+# Generated reconstruction field assets (raw exports and PNGs are covered by /Saved/)
+/Content/CGHSim/ObserverFields/Generated/
+
 # Generated files for source-based project plugins
 /Plugins/**/Binaries/
 /Plugins/**/Intermediate/
