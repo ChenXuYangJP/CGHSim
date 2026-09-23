@@ -58,7 +58,7 @@ struct CGHSIM_API FCGHDockerSolverSettings
 
 	/** Total request deadline including serialization, connection, send, and reception. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Docker", meta = (ClampMin = "0.1", Units = "s"))
-	double RequestTimeoutSeconds = 30.0;
+	double RequestTimeoutSeconds = 18000.0;
 };
 
 USTRUCT(BlueprintType)

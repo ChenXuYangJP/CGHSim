@@ -72,7 +72,7 @@ struct CGHSIM_API FCGHTargetParameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target", meta = (ClampMin = "0.0"))
 	double Amplitude = 1.0;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target", meta = (Units = "rad"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Target", meta = (Units = "rad", ForceUnits = "rad"))
 	double InitialPhaseRad = 0.0;
 };
 
@@ -92,7 +92,7 @@ struct CGHSIM_API FCGHLightParameters
 	double Amplitude = 1.0;
 
 	/** PlaneWave phase at the SLM origin; PointSource emitted spherical-wave phase offset. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (Units = "rad"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Light", meta = (Units = "rad", ForceUnits = "rad"))
 	double InitialPhaseRad = 0.0;
 
 	/** Exported in radians; validated but unused by the scalar PointFocus solver. */

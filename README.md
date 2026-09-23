@@ -230,3 +230,14 @@ GS/FFT propagation, lens aberrations, sensor exposure/noise/color response, and 
 - [Actor scaffold and usage](Docs/CGH_Actor_Scaffold.md) — class responsibilities, units, editor workflow, and scripts.
 - [Development handoff and plan](Docs/CGHSim_Development_Handoff.md) — completed work, validation evidence, and next steps.
 - [Development progress and environment setup (中文)](Docs/CGHSim_开发进度记录_2026-09-19.md) — environment history, build setup, and remote desktop workflow.
+
+## License
+
+CGHSim is licensed under the [MIT License](LICENSE).
+
+Unless otherwise noted, source code, documentation, Unreal project assets,
+and other project material authored for CGHSim are covered by the MIT License.
+
+Third-party material remains subject to its respective terms and is not
+relicensed under the CGHSim MIT License. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
